@@ -1,0 +1,11 @@
+.env
+.env.*
+!.env.example
+/bin/
+/coverage.out
+.DS_Store
+
+# 本地 YAML 可能包含凭据，只提交示例配置。
+/config.yaml
+/config.local.yaml
+.cache/

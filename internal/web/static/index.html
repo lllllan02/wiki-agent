@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Wiki Agent</title>
+  <style>
+    body{margin:0;background:#f6f7f9;color:#20242a;font:16px system-ui,sans-serif}
+    main{max-width:920px;margin:36px auto;padding:0 20px}
+    h1{font-size:28px;margin:0 0 6px}.sub{color:#68707c;margin-bottom:18px}
+    .project,.chat{background:white;border:1px solid #dfe3e8;border-radius:8px;box-shadow:0 4px 18px #0000000a}
+    .project{display:grid;grid-template-columns:1fr auto;gap:10px;padding:14px;margin-bottom:14px}
+    .project label{grid-column:1/-1;font-size:13px;color:#66707d}
+    input,textarea{box-sizing:border-box;width:100%;border:1px solid #cdd3db;border-radius:8px;font:inherit;background:white;color:inherit}
+    input{height:42px;padding:0 12px}
+    textarea{flex:1;resize:vertical;min-height:58px;padding:12px}
+    button{border:0;border-radius:8px;padding:0 20px;background:#2563eb;color:white;font:inherit;cursor:pointer}
+    button.secondary{background:#3f4652}
+    button:disabled{opacity:.5;cursor:not-allowed}
+    .chat{min-height:420px;padding:20px}
+    .msg{white-space:pre-wrap;line-height:1.6;margin:14px 0;padding:12px 15px;border-radius:8px;max-width:82%}
+    .user{margin-left:auto;background:#e5efff}.agent{background:#f0f2f5}.error{background:#fff0f0;color:#a31d1d}.system{background:#eef7f1;color:#245338}
+    .bar{display:flex;gap:10px;margin-top:14px}.tip{font-size:13px;color:#7b838e;margin-top:10px}
+    @media (max-width:640px){.project,.bar{display:flex;flex-direction:column}.msg{max-width:100%}button{height:42px}}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Wiki Agent</h1>
+    <div class="sub">本地 Wiki 助手 · 每个浏览器会话可以打开不同的知识库目录</div>
+    <form id="projectForm" class="project">
+      <label for="projectRoot">知识库目录</label>
+      <input id="projectRoot" placeholder="/Users/me/notes" required>
+      <button id="openProject" class="secondary">打开</button>
+    </form>
+    <section id="chat" class="chat"></section>
+    <form id="form" class="bar">
+      <textarea id="input" placeholder="例如：读取 notes/cache.md，总结缓存穿透。" required></textarea>
+      <button id="send">发送</button>
+    </form>
+    <div class="tip">Enter 发送，Shift+Enter 换行</div>
+  </main>
+  <script>
+    const chat=document.querySelector('#chat');
+    const input=document.querySelector('#input');
+    const form=document.querySelector('#form');
+    const send=document.querySelector('#send');
+    const projectForm=document.querySelector('#projectForm');
+    const projectRoot=document.querySelector('#projectRoot');
+    const openProject=document.querySelector('#openProject');
+
+    function add(text,kind){
+      const el=document.createElement('div');
+      el.className='msg '+kind;
+      el.textContent=text;
+      chat.appendChild(el);
+      el.scrollIntoView({behavior:'smooth'});
+      return el;
+    }
+
+    async function loadProject(){
+      const res=await fetch('/api/project');
+      const data=await res.json();
+      projectRoot.value=data.root||'';
+    }
+
+    projectForm.addEventListener('submit',async e=>{
+      e.preventDefault();
+      const root=projectRoot.value.trim();
+      if(!root)return;
+      openProject.disabled=true;
+      try{
+        const res=await fetch('/api/project',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({root})});
+        const data=await res.json();
+        if(!res.ok||data.error){add(data.error||'目录打开失败','error');return}
+        chat.textContent='';
+        projectRoot.value=data.root;
+        add('已打开知识库：'+data.root,'system');
+      }catch(err){
+        add('无法连接本地服务：'+err.message,'error');
+      }finally{
+        openProject.disabled=false;
+        input.focus();
+      }
+    });
+
+    form.addEventListener('submit',async e=>{
+      e.preventDefault();
+      const message=input.value.trim();
+      if(!message)return;
+      input.value='';
+      add(message,'user');
+      send.disabled=true;
+      const wait=add('正在处理…','agent');
+      try{
+        const res=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message})});
+        const data=await res.json();
+        wait.remove();
+        add(data.answer||data.error||'没有收到有效回答',data.error?'error':'agent');
+      }catch(err){
+        wait.remove();
+        add('无法连接本地服务：'+err.message,'error');
+      }finally{
+        send.disabled=false;
+        input.focus();
+      }
+    });
+
+    input.addEventListener('keydown',e=>{
+      if(e.key==='Enter'&&!e.shiftKey){
+        e.preventDefault();
+        form.requestSubmit();
+      }
+    });
+    loadProject().then(()=>input.focus()).catch(err=>add('读取项目目录失败：'+err.message,'error'));
+  </script>
+</body>
+</html>
