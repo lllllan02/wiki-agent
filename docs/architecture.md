@@ -1,5 +1,13 @@
 # 项目目录与设计说明
 
+## MCP 提前接入后的变化
+
+现已复用 EINO 官方 MCP Tool 适配器接入外部服务器。`internal/tool/mcp` 加载 `mcp.yaml`，提供 stdio / Streamable HTTP、工具白名单、命名空间、目录门控和调用限制；外部工具实现仍来自依赖包。`mcp/` 保存 Node.js 依赖锁和 Git MCP 的 Python 依赖声明。
+
+模型客户端长期复用；启用 MCP 时，每轮运行按当前 Wiki 创建独立连接、工具集合和 EINO Agent，结束后释放。默认注册表启用 Filesystem 和 ripgrep；启用 Filesystem 读取后不重复开放原 `read_note`。没有配置 MCP 时继续使用 L01 原路径。
+
+下文的「L01 实际目录」及单工具说明保留为初始架构背景；当前接入细节与限制以 [MCP 接入说明](mcp.md) 为准。提案、受控写入、持久恢复与多 Agent 尚未实现。
+
 ## 入口与核心的关系
 
 当前唯一入口是本地 Web 页面。浏览器负责选择知识库目录、输入和展示，Gin 服务负责 HTTP 路由与会话，WikiAgent 负责把请求交给 EINO Agent 执行；页面只保存当前会话选择的目录，不直接执行工具，也不判断文件权限。

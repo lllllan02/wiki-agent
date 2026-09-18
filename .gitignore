@@ -9,3 +9,6 @@
 /config.yaml
 /config.local.yaml
 .cache/
+/mcp/node_modules/
+/mcp.local.yaml
+/var/

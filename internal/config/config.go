@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"time"
@@ -17,6 +18,14 @@ type Config struct {
 	Wiki   Wiki   `mapstructure:"wiki"`
 	Agent  Agent  `mapstructure:"agent"`
 	Server Server `mapstructure:"server"`
+	MCP    MCP    `mapstructure:"mcp"`
+}
+
+// MCP 只配置接入行为；服务器清单单独保存，避免把外部工具定义写进 Go 代码。
+type MCP struct {
+	RegistryFile string        `mapstructure:"registry_file" default:""`  // 空值保留原只读助手；相对路径按 config.yaml 所在目录解析。
+	Timeout      time.Duration `mapstructure:"timeout" default:"30s"`     // 每次握手、发现或调用的超时。
+	MaxBytes     int           `mapstructure:"max_bytes" default:"32768"` // 进入模型的单次 MCP 输出上限。
 }
 
 // Model 只描述模型连接。密钥和模型名默认留空，不能替用户猜测服务或凭据。
@@ -68,6 +77,9 @@ func Load(path string) (Config, error) {
 	if err := v.UnmarshalExact(&cfg); err != nil {
 		return Config{}, fmt.Errorf("解析配置失败: %w", err)
 	}
+	if cfg.MCP.RegistryFile != "" && !filepath.IsAbs(cfg.MCP.RegistryFile) {
+		cfg.MCP.RegistryFile = filepath.Join(filepath.Dir(path), cfg.MCP.RegistryFile)
+	}
 	return cfg, nil
 }
 
@@ -85,6 +97,8 @@ func (c Config) Validate() error {
 		return fmt.Errorf("agent.max_steps 必须大于 0")
 	case strings.TrimSpace(c.Server.Address) == "":
 		return fmt.Errorf("server.address 不能为空")
+	case c.MCP.Timeout <= 0 || c.MCP.MaxBytes <= 0 || c.MCP.MaxBytes > 1024*1024:
+		return fmt.Errorf("mcp.timeout 必须大于 0，mcp.max_bytes 必须在 1 到 1048576 之间")
 	}
 	return nil
 }

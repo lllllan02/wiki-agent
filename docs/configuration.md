@@ -42,3 +42,9 @@ go run ./cmd/wiki-agent
 修改配置后重新启动服务，然后在浏览器打开 `http://127.0.0.1:8080`。页面顶部填写后端能访问的本机目录并点击“打开”，当前浏览器会话会切换到该目录；切换目录会清空该会话的历史。
 
 配置来源只有 YAML 和代码中的默认值，优先级是 `YAML > default 标签`。配置文件可能包含密钥，已被 Git 忽略，不要提交或分享。
+
+## MCP 配置
+
+新增 `mcp.registry_file`（默认空）、`mcp.timeout`（默认 `30s`）、`mcp.max_bytes`（默认 `32768`）。`registry_file` 相对路径以 `config.yaml` 所在目录为基准；空值保留原 `read_note`。指定 `mcp.yaml` 后使用注册表中的已启用服务，现成服务器需要先安装。
+
+服务启停、命令、地址和工具白名单在注册表中配置；敏感认证头写到被忽略的 `mcp.local.yaml`，并让 `registry_file` 指向该文件。产品配置仍只来自 YAML，不自动读取环境变量覆盖。详见 [MCP 接入说明](mcp.md)。

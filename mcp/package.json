@@ -1,0 +1,11 @@
+{
+  "name": "wiki-agent-mcp-runtime",
+  "private": true,
+  "description": "复用的 MCP 服务器，不包含自行实现的工具",
+  "dependencies": {
+    "@modelcontextprotocol/server-filesystem": "2026.8.31",
+    "@modelcontextprotocol/server-memory": "2026.8.31",
+    "@playwright/mcp": "0.0.81",
+    "mcp-ripgrep": "0.4.0"
+  }
+}

@@ -12,6 +12,7 @@ import (
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 	"github.com/lllllan02/wiki-agent/internal/config"
+	mcptools "github.com/lllllan02/wiki-agent/internal/tool/mcp"
 	"github.com/lllllan02/wiki-agent/internal/tool/wiki"
 )
 
@@ -23,11 +24,13 @@ type Result struct {
 // WikiAgent 是 Web 层复用的 Agent 对象。
 //
 // 模型客户端和 EINO ChatModelAgent 在创建 WikiAgent 时完成初始化。
-// RunWithHistory 只负责把本轮消息交给一个新的 EINO Runner 去执行，避免把一次运行
-// 的状态误放进长期复用对象里，也避免每轮都重建模型和 Agent。
+// RunWithHistory 为本轮知识库建立 MCP 会话，并交给新的 EINO Runner，避免把一次运行
+// 的状态误放进长期复用对象里。模型复用；启用 MCP 时 Agent 使用本轮工具集合。
 type WikiAgent struct {
-	cfg   config.Config
-	agent adk.Agent
+	cfg      config.Config
+	agent    adk.Agent
+	model    *openai.ChatModel
+	registry *mcptools.Registry
 }
 
 func NewWikiAgent(ctx context.Context, cfg config.Config) (*WikiAgent, error) {
@@ -44,31 +47,66 @@ func NewWikiAgent(ctx context.Context, cfg config.Config) (*WikiAgent, error) {
 	if err != nil {
 		return nil, err
 	}
-	a, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+	registry, err := mcptools.Load(cfg.MCP.RegistryFile)
+	if err != nil {
+		return nil, err
+	}
+	a, err := newChatAgent(ctx, cfg, cm, []tool.BaseTool{wiki.ReadNoteTool{MaxBytes: cfg.Wiki.MaxReadBytes}})
+	if err != nil {
+		return nil, err
+	}
+	return &WikiAgent{cfg: cfg, agent: a, model: cm, registry: registry}, nil
+}
+
+func newChatAgent(ctx context.Context, cfg config.Config, cm *openai.ChatModel, tools []tool.BaseTool) (adk.Agent, error) {
+	return adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
 		Name:          "wiki_agent",
-		Description:   "读取本地 Markdown 知识库并回答问题",
+		Description:   "检索本地 Markdown 知识库并通过已配置 MCP 收集资料",
 		Instruction:   systemPrompt,
 		Model:         cm,
 		MaxIterations: cfg.Agent.MaxSteps,
 		ToolsConfig: adk.ToolsConfig{
 			ToolsNodeConfig: compose.ToolsNodeConfig{
-				Tools:               []tool.BaseTool{wiki.ReadNoteTool{MaxBytes: cfg.Wiki.MaxReadBytes}},
+				Tools:               tools,
 				ExecuteSequentially: true,
 			},
 		},
 	})
-	if err != nil {
-		return nil, err
-	}
-	return &WikiAgent{cfg: cfg, agent: a}, nil
 }
 
 func (a *WikiAgent) RunWithHistory(ctx context.Context, root string, request string, history []*schema.Message) (*Result, error) {
 	if strings.TrimSpace(request) == "" {
 		return &Result{Messages: append([]*schema.Message(nil), history...)}, fmt.Errorf("用户请求不能为空")
 	}
+	session, err := a.registry.Open(ctx, root, a.cfg.MCP)
+	if err != nil {
+		return nil, err
+	}
+	defer session.Close()
+	runAgent := a.agent
+	if len(session.Tools) > 0 {
+		tools := append([]tool.BaseTool(nil), session.Tools...)
+		// 现成读取工具启用后不再向模型暴露同功能的本地 read_note。
+		hasRead := false
+		for _, base := range tools {
+			info, err := base.Info(ctx)
+			if err != nil {
+				return nil, err
+			}
+			if info.Name == "filesystem__read_text_file" {
+				hasRead = true
+			}
+		}
+		if !hasRead {
+			tools = append(tools, wiki.ReadNoteTool{MaxBytes: a.cfg.Wiki.MaxReadBytes})
+		}
+		runAgent, err = newChatAgent(ctx, a.cfg, a.model, tools)
+		if err != nil {
+			return nil, err
+		}
+	}
 	messagesForRun := append(append([]*schema.Message(nil), history...), schema.UserMessage(request))
-	runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: a.agent})
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: runAgent})
 	iter := runner.Run(ctx, messagesForRun, adk.WithToolOptions([]tool.Option{wiki.WithProject(root, a.cfg.Wiki.MaxReadBytes)}))
 	var answer string
 	for {
