@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -15,7 +16,6 @@ import (
 // mapstructure 对应 YAML 键，default 用于反射初始化。
 type Config struct {
 	Model  Model  `mapstructure:"model"`
-	Wiki   Wiki   `mapstructure:"wiki"`
 	Agent  Agent  `mapstructure:"agent"`
 	Server Server `mapstructure:"server"`
 	MCP    MCP    `mapstructure:"mcp"`
@@ -23,7 +23,7 @@ type Config struct {
 
 // MCP 只配置接入行为；服务器清单单独保存，避免把外部工具定义写进 Go 代码。
 type MCP struct {
-	RegistryFile string        `mapstructure:"registry_file" default:""`  // 空值保留原只读助手；相对路径按 config.yaml 所在目录解析。
+	RegistryFile string        `mapstructure:"registry_file" default:""`  // 必填；相对路径按 config.yaml 所在目录解析。
 	Timeout      time.Duration `mapstructure:"timeout" default:"30s"`     // 每次握手、发现或调用的超时。
 	MaxBytes     int           `mapstructure:"max_bytes" default:"32768"` // 进入模型的单次 MCP 输出上限。
 }
@@ -34,11 +34,6 @@ type Model struct {
 	Name    string        `mapstructure:"name" default:""`       // 服务商支持工具调用的模型名称。
 	BaseURL string        `mapstructure:"base_url" default:""`   // 空值沿用 EINO 适配器的默认地址。
 	Timeout time.Duration `mapstructure:"timeout" default:"60s"` // 有限等待，防止模型请求一直占用服务。
-}
-
-// Wiki 只保存工具读取行为的参数；具体知识库目录由网页会话选择。
-type Wiki struct {
-	MaxReadBytes int `mapstructure:"max_read_bytes" default:"16384"` // 控制每次进入模型上下文的资料量。
 }
 
 // Agent 的步数计数单位是模型请求次数，而不是工具调用数量。
@@ -77,6 +72,7 @@ func Load(path string) (Config, error) {
 	if err := v.UnmarshalExact(&cfg); err != nil {
 		return Config{}, fmt.Errorf("解析配置失败: %w", err)
 	}
+	cfg.Model.BaseURL = strings.TrimRight(strings.TrimSpace(cfg.Model.BaseURL), "/")
 	if cfg.MCP.RegistryFile != "" && !filepath.IsAbs(cfg.MCP.RegistryFile) {
 		cfg.MCP.RegistryFile = filepath.Join(filepath.Dir(path), cfg.MCP.RegistryFile)
 	}
@@ -86,13 +82,19 @@ func Load(path string) (Config, error) {
 // Validate 在调用模型之前报出配置问题，避免把本地配置错误变成远端请求错误。
 // 默认对象可以被创建和检查，但空密钥等默认值并不意味着可以直接发起模型请求。
 func (c Config) Validate() error {
+	if c.Model.BaseURL != "" {
+		u, err := url.Parse(c.Model.BaseURL)
+		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+			return fmt.Errorf("model.base_url 必须是完整的 HTTP(S) API 地址")
+		}
+	}
 	switch {
 	case strings.TrimSpace(c.Model.APIKey) == "" || strings.TrimSpace(c.Model.Name) == "":
 		return fmt.Errorf("请配置 model.api_key 和 model.name")
 	case c.Model.Timeout <= 0:
 		return fmt.Errorf("model.timeout 必须大于 0")
-	case c.Wiki.MaxReadBytes <= 0 || c.Wiki.MaxReadBytes > 1024*1024:
-		return fmt.Errorf("wiki.max_read_bytes 必须在 1 到 1048576 之间")
+	case strings.TrimSpace(c.MCP.RegistryFile) == "":
+		return fmt.Errorf("请配置 mcp.registry_file；当前工具由 MCP 注册表提供")
 	case c.Agent.MaxSteps <= 0:
 		return fmt.Errorf("agent.max_steps 必须大于 0")
 	case strings.TrimSpace(c.Server.Address) == "":

@@ -1,5 +1,6 @@
 # 现成 MCP 注册表。npm ci --prefix mcp 安装已锁定的 Node.js 服务器。
-# ${PROJECT_ROOT} = 本注册表所在目录；${WIKI_ROOT} = 当前 Web 会话选择的 Wiki。
+# 所有服务在应用生命周期内跨 Agent、跨目录复用；目录通过工具调用参数传入。
+# ${PROJECT_ROOT} = 本注册表所在目录。
 # 需要密钥时复制为 mcp.local.yaml，并在 config.yaml 中引用它；不要提交凭据。
 # enabled 表示向 Agent 开放；tools 只列本阶段使用的能力，不自动开放服务端所有工具。
 servers:
@@ -7,7 +8,7 @@ servers:
     enabled: true
     transport: stdio
     command: node
-    args: ["${PROJECT_ROOT}/mcp/node_modules/@modelcontextprotocol/server-filesystem/dist/index.js", "${WIKI_ROOT}"]
+    args: ["${PROJECT_ROOT}/mcp/node_modules/@modelcontextprotocol/server-filesystem/dist/index.js", "/"]
     tools: [list_directory, search_files, read_text_file, get_file_info]
     path_parameters: [path]
 
@@ -28,7 +29,7 @@ servers:
     tools: [tavily-search, tavily-extract]
 
   - name: playwright
-    enabled: false # 已安装服务器；网页任务阶段再开放，会话当前按单轮运行隔离。
+    enabled: false # 已安装服务器；网页任务阶段再开放；持久浏览器状态需在 L23 单独设计。
     transport: stdio
     command: node
     args: ["${PROJECT_ROOT}/mcp/node_modules/@playwright/mcp/cli.js", "--headless", "--isolated", "--browser", "chrome"]
@@ -39,7 +40,7 @@ servers:
     enabled: false # 先安装 mcp/requirements.txt；只适用于 Git 知识库。
     transport: stdio
     command: "${PROJECT_ROOT}/.cache/mcp-python/bin/python"
-    args: ["-m", "mcp_server_git", "--repository", "${WIKI_ROOT}"]
+    args: ["-m", "mcp_server_git"]
     tools: [git_status, git_diff_unstaged, git_diff_staged, git_log]
     path_parameters: [repo_path]
 
@@ -49,14 +50,5 @@ servers:
     command: node
     args: ["${PROJECT_ROOT}/mcp/node_modules/@modelcontextprotocol/server-memory/dist/index.js"]
     env:
-      MEMORY_FILE_PATH: "${WIKI_ROOT}/.wiki-agent-memory.jsonl"
+      MEMORY_FILE_PATH: "${PROJECT_ROOT}/var/memory.jsonl"
     tools: [search_nodes, open_nodes]
-
-  - name: obsidian
-    enabled: false # maxkuminov/obsidian-mcp 需要单独部署 Linux + PostgreSQL 服务。
-    transport: streamable_http
-    url: "" # 部署后的 /mcp 地址。
-    headers:
-      Authorization: "Bearer REPLACE_WITH_OBSIDIAN_API_KEY"
-    bound_wiki: "" # 远程 vault 对应的本地绝对目录，防止页面切换 Wiki 后仍访问旧库。
-    tools: [get_backlinks, get_neighborhood]

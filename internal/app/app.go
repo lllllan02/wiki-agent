@@ -1,7 +1,7 @@
 // Package app 负责启动和关闭本地 Web 服务。
 //
 // main.go 只适合表达“启动程序”这个动作；这里也只保留必须由应用层关闭的
-// HTTP server。模型、WikiAgent 和工具对象由真正使用它们的内部包创建。
+// HTTP server。模型和工具由使用它们的 Agent 创建。
 package app
 
 import (

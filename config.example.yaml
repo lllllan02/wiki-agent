@@ -6,9 +6,6 @@ model:
   base_url: ""                # 兼容服务填写完整 API 地址；DeepSeek 使用 https://api.deepseek.com/v1。
   timeout: 60s                 # 使用带单位的时间，避免把毫秒误写成秒。
 
-wiki:
-  max_read_bytes: 16384        # 读取上限避免一次把大笔记全部放入上下文，最多 1 MiB；知识库目录在网页中选择。
-
 agent:
   max_steps: 8                 # 一步指一次模型请求，同一步可顺序执行多个工具调用。
 
@@ -16,6 +13,6 @@ server:
   address: "127.0.0.1:8080"  # 浏览器访问的本地地址。
 
 mcp:
-  registry_file: mcp.yaml    # 服务器注册表；先执行 npm ci --prefix mcp。留空使用原 read_note。
+  registry_file: mcp.yaml    # 必填；服务器注册表。先执行 npm ci --prefix mcp。
   timeout: 30s               # 每次 MCP 握手、发现、调用的超时。
   max_bytes: 32768           # 工具结果超出后明确标注截断。

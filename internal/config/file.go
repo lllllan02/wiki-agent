@@ -41,7 +41,7 @@ func EnsureFile(path string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("创建配置文件失败: %w", err)
 	}
-	_, writeErr := file.Write(append([]byte("# Wiki Agent 本地配置。填写 model.api_key、model.name 和 model.base_url。\n# 修改后重新启动服务。此文件可能含密钥，不要提交或分享。\n"), body...))
+	_, writeErr := file.Write(append([]byte("# Wiki Agent 本地配置。填写 model.api_key、model.name 和 mcp.registry_file。\n# 修改后重新启动服务。此文件可能含密钥，不要提交或分享。\n"), body...))
 	closeErr := file.Close()
 	if writeErr != nil {
 		return false, writeErr

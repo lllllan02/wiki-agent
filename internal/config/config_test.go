@@ -13,7 +13,7 @@ func TestNewDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Model.Timeout != time.Minute || cfg.Model.APIKey != "" || cfg.Wiki.MaxReadBytes != 16384 || cfg.Agent.MaxSteps != 8 {
+	if cfg.Model.Timeout != time.Minute || cfg.Model.APIKey != "" || cfg.Agent.MaxSteps != 8 {
 		t.Fatalf("默认值不符合预期: %+v", cfg)
 	}
 	model, err := NewDefaults[Model]()
@@ -35,12 +35,12 @@ func yamlFile(t *testing.T, body string) string {
 func TestLoadYAML(t *testing.T) {
 	t.Setenv("OPENAI_MODEL", "ignored-model")
 	t.Setenv("WIKI_AGENT_AGENT_MAX_STEPS", "99")
-	path := yamlFile(t, "model:\n  api_key: test-key\n  name: yaml-model\n  timeout: 12s\nagent:\n  max_steps: 12\n")
+	path := yamlFile(t, "model:\n  api_key: test-key\n  name: yaml-model\n  timeout: 12s\nagent:\n  max_steps: 12\nmcp:\n  registry_file: mcp.yaml\n")
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Model.Name != "yaml-model" || cfg.Model.Timeout != 12*time.Second || cfg.Agent.MaxSteps != 12 || cfg.Wiki.MaxReadBytes != 16384 {
+	if cfg.Model.Name != "yaml-model" || cfg.Model.Timeout != 12*time.Second || cfg.Agent.MaxSteps != 12 {
 		t.Fatal("YAML 或默认值没有正确加载")
 	}
 	if err := cfg.Validate(); err != nil {
@@ -59,6 +59,7 @@ func TestLoadFilesAndErrors(t *testing.T) {
 	}
 	for name, body := range map[string]string{
 		"拼写错误":    "agent:\n  max_step: 2\n",
+		"已删除字段":   "wiki:\n  root: wiki\n",
 		"类型错误":    "agent:\n  max_steps: abc\n",
 		"时间错误":    "model:\n  timeout: tomorrow\n",
 		"YAML 损坏": "model: [\n",
@@ -90,7 +91,7 @@ func TestEnsureFile(t *testing.T) {
 		t.Fatalf("创建失败: %v", err)
 	}
 	cfg, err := Load(path)
-	if err != nil || cfg.Model.Timeout != time.Minute || cfg.Wiki.MaxReadBytes != 16384 {
+	if err != nil || cfg.Model.Timeout != time.Minute {
 		t.Fatalf("生成文件不能还原默认值: %v", err)
 	}
 	info, err := os.Stat(path)
@@ -113,12 +114,11 @@ func TestEnsureFile(t *testing.T) {
 
 func TestValidation(t *testing.T) {
 	for name, change := range map[string]func(*Config){
-		"缺密钥":    func(c *Config) { c.Model.APIKey = "" },
-		"缺模型":    func(c *Config) { c.Model.Name = " " },
-		"超时无效":   func(c *Config) { c.Model.Timeout = 0 },
-		"读取上限过大": func(c *Config) { c.Wiki.MaxReadBytes = 1024*1024 + 1 },
-		"读取上限无效": func(c *Config) { c.Wiki.MaxReadBytes = 0 },
-		"步数无效":   func(c *Config) { c.Agent.MaxSteps = -1 },
+		"缺密钥":     func(c *Config) { c.Model.APIKey = "" },
+		"缺模型":     func(c *Config) { c.Model.Name = " " },
+		"超时无效":    func(c *Config) { c.Model.Timeout = 0 },
+		"未配置 MCP": func(c *Config) { c.MCP.RegistryFile = "" },
+		"步数无效":    func(c *Config) { c.Agent.MaxSteps = -1 },
 	} {
 		t.Run(name, func(t *testing.T) {
 			cfg, err := NewDefaults[Config]()
@@ -126,6 +126,7 @@ func TestValidation(t *testing.T) {
 				t.Fatal(err)
 			}
 			cfg.Model.APIKey, cfg.Model.Name = "test-key", "test-model"
+			cfg.MCP.RegistryFile = "mcp.yaml"
 			change(&cfg)
 			if cfg.Validate() == nil {
 				t.Fatal("应该拒绝无效配置")

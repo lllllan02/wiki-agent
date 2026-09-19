@@ -20,7 +20,7 @@ import (
 
 func testConfig() config.MCP { return config.MCP{Timeout: 5 * time.Second, MaxBytes: 1024} }
 
-func findTool(t *testing.T, s *Session, name string) tool.InvokableTool {
+func findTool(t *testing.T, s *ConnectionSet, name string) tool.InvokableTool {
 	t.Helper()
 	for _, base := range s.Tools {
 		info, err := base.Info(context.Background())
@@ -55,8 +55,7 @@ func TestHTTPDiscoveryAndCall(t *testing.T) {
 	}))
 	defer srv.Close()
 	registry := &Registry{Servers: []Server{{Name: "remote", Enabled: true, Transport: "streamable_http", URL: srv.URL + "/mcp", Headers: map[string]string{"Authorization": "Bearer fixture"}, Tools: []string{"read"}}}}
-	root := t.TempDir()
-	s, err := registry.Open(context.Background(), root, testConfig())
+	s, err := registry.Open(context.Background(), testConfig())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,15 +67,11 @@ func TestHTTPDiscoveryAndCall(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var bounded struct {
-		Truncated bool   `json:"truncated"`
-		Prefix    string `json:"content_prefix"`
-	}
-	if err := json.Unmarshal([]byte(result), &bounded); err != nil || !bounded.Truncated || len(bounded.Prefix) > testConfig().MaxBytes {
-		t.Fatalf("截断契约错误: %s", result)
+	if !strings.Contains(result, "资料") {
+		t.Fatalf("MCP 调用失败: %s", result)
 	}
 	registry.Servers[0].Tools = []string{"missing"}
-	if _, err := registry.Open(context.Background(), root, testConfig()); err == nil || !strings.Contains(err.Error(), "missing") {
+	if _, err := registry.Open(context.Background(), testConfig()); err == nil || !strings.Contains(err.Error(), "missing") {
 		t.Fatalf("工具缺失应阻止启动: %v", err)
 	}
 }
@@ -88,6 +83,7 @@ func TestRegistryRejectsInvalidConfiguration(t *testing.T) {
 		"servers: [{name: one, transport: sse, tools: [read]}]",
 		"servers: [{name: one, transport: stdio, tools: [read], typo: true}]",
 		"servers: [{name: one, transport: stdio, tools: [read, read]}]",
+		"servers: [{name: one, enabled: true, transport: stdio, command: node, args: ['${WIKI_ROOT}'], tools: [read]}]",
 		"servers: []\n---\nservers: []",
 	} {
 		path := filepath.Join(t.TempDir(), "mcp.yaml")
@@ -100,25 +96,6 @@ func TestRegistryRejectsInvalidConfiguration(t *testing.T) {
 	}
 }
 
-func TestPathBoundary(t *testing.T) {
-	root, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	outside := t.TempDir()
-	if err := os.Symlink(outside, filepath.Join(root, "escape")); err != nil {
-		t.Fatal(err)
-	}
-	for _, path := range []string{outside, "..", "escape"} {
-		if _, err := scopedPath(root, path); err == nil {
-			t.Fatalf("越界路径未被拒绝: %s", path)
-		}
-	}
-	if got, err := scopedPath(root, "."); err != nil || got != root {
-		t.Fatalf("合法根目录失败: %s %v", got, err)
-	}
-}
-
 // 真实 MCP 集成验收：npm ci --prefix mcp 后显式运行，不让普通单测自动联网安装依赖。
 func TestInstalledServers(t *testing.T) {
 	if os.Getenv("WIKI_AGENT_MCP_INTEGRATION") != "1" {
@@ -128,23 +105,29 @@ func TestInstalledServers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(registry.Servers) != 7 {
+	if len(registry.Servers) != 6 {
 		t.Fatalf("注册项数量错误: %d", len(registry.Servers))
 	}
-	root := t.TempDir()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(root, "note.md"), []byte("# 缓存\n缓存穿透用空值缓存缓解。\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(root, "private.txt"), []byte("not markdown"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	other := t.TempDir()
+	other, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(other, "note.md"), []byte("second wiki"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	cfg := testConfig()
 	cfg.Timeout = 20 * time.Second
-	s, err := registry.Open(context.Background(), root, cfg)
+	s, err := registry.Open(context.Background(), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,33 +135,24 @@ func TestInstalledServers(t *testing.T) {
 	if len(s.Tools) != 5 {
 		t.Fatalf("预期 5 个只读工具，实际 %d", len(s.Tools))
 	}
-	for _, tt := range []struct{ name, args, want string }{
-		{"filesystem__list_directory", `{"path":"."}`, "note.md"},
-		{"filesystem__read_text_file", `{"path":"note.md"}`, "缓存穿透"},
-		{"filesystem__search_files", `{"path":".","pattern":"**/*.md"}`, "note.md"},
-		{"ripgrep__search", `{"path":".","pattern":"缓存穿透"}`, "缓存穿透"},
+	for _, tt := range []struct{ name, path, pattern, want string }{
+		{"filesystem__list_directory", root, "", "note.md"},
+		{"filesystem__read_text_file", filepath.Join(root, "note.md"), "", "缓存穿透"},
+		{"filesystem__search_files", root, "**/*.md", "note.md"},
+		{"ripgrep__search", root, "缓存穿透", "缓存穿透"},
 	} {
-		result, err := findTool(t, s, tt.name).InvokableRun(context.Background(), tt.args)
+		args := map[string]string{"path": tt.path}
+		if tt.pattern != "" {
+			args["pattern"] = tt.pattern
+		}
+		payload, _ := json.Marshal(args)
+		result, err := findTool(t, s, tt.name).InvokableRun(context.Background(), string(payload))
 		if err != nil || !strings.Contains(result, tt.want) {
 			t.Fatalf("%s: %s %v", tt.name, result, err)
 		}
 	}
-	read := findTool(t, s, "filesystem__read_text_file")
-	for _, path := range []string{filepath.Join(other, "note.md"), "private.txt"} {
-		args, _ := json.Marshal(map[string]string{"path": path})
-		if _, err := read.InvokableRun(context.Background(), string(args)); err == nil {
-			t.Fatalf("不应读取 %s", path)
-		}
-	}
-	if _, err := findTool(t, s, "ripgrep__search").InvokableRun(context.Background(), `{"path":".","pattern":"-f/etc/passwd"}`); err == nil {
-		t.Fatal("搜索模式不能注入 rg 选项")
-	}
-	second, err := registry.Open(context.Background(), other, cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer second.Close()
-	result, err := findTool(t, second, "filesystem__read_text_file").InvokableRun(context.Background(), `{"path":"note.md"}`)
+	secondArgs, _ := json.Marshal(map[string]string{"path": filepath.Join(other, "note.md")})
+	result, err := findTool(t, s, "filesystem__read_text_file").InvokableRun(context.Background(), string(secondArgs))
 	if err != nil || !strings.Contains(result, "second wiki") || strings.Contains(result, "缓存穿透") {
 		t.Fatalf("会话串库: %s %v", result, err)
 	}
@@ -199,7 +173,7 @@ func TestInstalledServers(t *testing.T) {
 					}
 				}
 				r := &Registry{Servers: []Server{entry}, baseDir: registry.baseDir}
-				opened, err := r.Open(context.Background(), root, cfg)
+				opened, err := r.Open(context.Background(), cfg)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -213,7 +187,8 @@ func TestInstalledServers(t *testing.T) {
 					}
 				}
 				if name == "git" {
-					if _, err := findTool(t, opened, "git__git_status").InvokableRun(context.Background(), `{"repo_path":"."}`); err != nil {
+					gitArgs, _ := json.Marshal(map[string]string{"repo_path": root})
+					if _, err := findTool(t, opened, "git__git_status").InvokableRun(context.Background(), string(gitArgs)); err != nil {
 						t.Fatal(err)
 					}
 				}

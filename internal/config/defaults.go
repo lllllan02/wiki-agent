@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// NewDefaults 创建带标签默认值的配置对象，也适用于 Model、Wiki 等单独分组。
+// NewDefaults 创建带标签默认值的配置对象，也适用于 Model 等单独分组。
 // Go 不会在 Config{} 或 new(Config) 时执行构造函数，因此业务代码必须使用此入口或 Load。
 // 不对已有对象“补零值”：false、0、空字符串可能是用户明确选择，不能据此判断字段未配置。
 func NewDefaults[T any]() (T, error) {
