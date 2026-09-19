@@ -35,8 +35,21 @@ type Server struct {
 	pickDirectory func(context.Context) (string, error)
 }
 type conversationState struct {
-	mu   sync.Mutex
-	root string
+	mu    sync.Mutex
+	root  string
+	inbox chan *chatJob
+}
+type chatJob struct {
+	ctx     context.Context
+	root    string
+	session string
+	message string
+	onText  func(string) error
+	done    chan chatResult
+}
+type chatResult struct {
+	result *agent.Result
+	err    error
 }
 
 func New(wikiAgent WikiAgent) *Server {
@@ -153,14 +166,13 @@ func (s *Server) streamChat(c *gin.Context) {
 		return
 	}
 	state := s.state(id)
-	// 同一对话串行推进，其他对话可并行使用各自的 Wiki 上下文。
 	state.mu.Lock()
-	defer state.mu.Unlock()
-	if state.root == "" {
+	root := state.root
+	state.mu.Unlock()
+	if root == "" {
 		c.JSON(400, chatResponse{Error: "请先打开知识库目录"})
 		return
 	}
-	ctx := runcontext.With(c.Request.Context(), runcontext.Metadata{SessionID: id, WikiRoot: state.root})
 	c.Header("Content-Type", "application/x-ndjson; charset=utf-8")
 	c.Header("Cache-Control", "no-cache, no-transform")
 	c.Header("X-Accel-Buffering", "no")
@@ -182,9 +194,23 @@ func (s *Server) streamChat(c *gin.Context) {
 		}
 		return write(streamEvent{Type: "update", HTML: html})
 	}
-	result, err := s.agent.Stream(ctx, strings.TrimSpace(req.Message), onText)
+	job := &chatJob{
+		ctx:     c.Request.Context(),
+		root:    root,
+		session: id,
+		message: strings.TrimSpace(req.Message),
+		onText:  onText,
+		done:    make(chan chatResult, 1),
+	}
+	select {
+	case state.inbox <- job:
+	case <-c.Request.Context().Done():
+		return
+	}
+	outcome := <-job.done
+	result, err := outcome.result, outcome.err
 	if err != nil {
-		if ctx.Err() == nil {
+		if c.Request.Context().Err() == nil {
 			_ = write(streamEvent{Type: "error", Error: friendlyError(err)})
 		}
 		return
@@ -226,10 +252,18 @@ func (s *Server) state(id string) *conversationState {
 	defer s.mu.Unlock()
 	state := s.conversations[id]
 	if state == nil {
-		state = &conversationState{}
+		state = &conversationState{inbox: make(chan *chatJob, 16)}
 		s.conversations[id] = state
+		go s.runConversation(state)
 	}
 	return state
+}
+func (s *Server) runConversation(state *conversationState) {
+	for job := range state.inbox {
+		ctx := runcontext.With(job.ctx, runcontext.Metadata{SessionID: job.session, WikiRoot: job.root})
+		result, err := s.agent.Stream(ctx, job.message, job.onText)
+		job.done <- chatResult{result: result, err: err}
+	}
 }
 func conversationID(c *gin.Context) string {
 	id := c.GetHeader("X-Conversation-ID")

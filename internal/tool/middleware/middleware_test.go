@@ -3,7 +3,9 @@ package middleware
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -23,6 +25,42 @@ func (t governedTool) Info(context.Context) (*schema.ToolInfo, error) { return t
 
 func (t governedTool) InvokableRun(ctx context.Context, args string, opts ...tool.Option) (string, error) {
 	return t.run(ctx, args, opts...)
+}
+
+type controlledDelayTool struct {
+	info                  *schema.ToolInfo
+	delay                 time.Duration
+	waitForCancel         bool
+	returnLateAfterCancel bool
+	result                string
+	err                   error
+	calls                 atomic.Int32
+}
+
+func (t *controlledDelayTool) Info(context.Context) (*schema.ToolInfo, error) { return t.info, nil }
+
+func (t *controlledDelayTool) InvokableRun(ctx context.Context, args string, opts ...tool.Option) (string, error) {
+	t.calls.Add(1)
+	if t.waitForCancel {
+		<-ctx.Done()
+		if t.returnLateAfterCancel {
+			return t.result, t.err
+		}
+		return "", ctx.Err()
+	}
+	if t.delay > 0 {
+		timer := time.NewTimer(t.delay)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			if t.returnLateAfterCancel {
+				return t.result, t.err
+			}
+			return "", ctx.Err()
+		}
+	}
+	return t.result, t.err
 }
 
 func TestChainWrapsResultAndRewritesWikiPath(t *testing.T) {
@@ -112,18 +150,62 @@ func TestChainRejectsPathOutsideWiki(t *testing.T) {
 }
 
 func TestChainConvertsTimeoutToContract(t *testing.T) {
-	base := governedTool{
-		info: toolInfoWithPath(),
-		run: func(ctx context.Context, args string, opts ...tool.Option) (string, error) {
-			<-ctx.Done()
-			return "", ctx.Err()
-		},
+	base := &controlledDelayTool{
+		info:          toolInfoWithPath(),
+		waitForCancel: true,
 	}
 	output, err := invokeGovernedTool(t, t.TempDir(), base, `{"path":"notes/a.md"}`, &config.MCP{Timeout: time.Nanosecond})
 	if err != nil {
 		t.Fatal(err)
 	}
 	assertContractError(t, output, "timeout")
+}
+
+func TestChainRejectsLateToolResultAfterTimeout(t *testing.T) {
+	base := &controlledDelayTool{
+		info:                  toolInfoWithPath(),
+		waitForCancel:         true,
+		returnLateAfterCancel: true,
+		result:                "late success",
+	}
+	output, err := invokeGovernedTool(t, t.TempDir(), base, `{"path":"notes/a.md"}`, &config.MCP{Timeout: time.Nanosecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertContractError(t, output, "timeout")
+}
+
+func TestChainWrapsDelayedToolFailure(t *testing.T) {
+	want := errors.New("controlled failure")
+	base := &controlledDelayTool{
+		info:   toolInfoWithPath(),
+		delay:  time.Millisecond,
+		result: "",
+		err:    want,
+	}
+	output, err := invokeGovernedTool(t, t.TempDir(), base, `{"path":"notes/a.md"}`, &config.MCP{Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if base.calls.Load() != 1 {
+		t.Fatalf("calls = %d, want 1", base.calls.Load())
+	}
+	assertContractError(t, output, "tool_failure")
+}
+
+func TestTimeoutDoesNotStartToolAfterParentCanceled(t *testing.T) {
+	called := false
+	next := func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
+		called = true
+		return &compose.ToolOutput{Result: "unexpected"}, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	wrapped := Timeout(time.Second).Invokable(next)
+	_, err := wrapped(ctx, &compose.ToolInput{Name: "fixture"})
+	if !errors.Is(err, context.Canceled) || called {
+		t.Fatalf("parent cancel: err=%v called=%v", err, called)
+	}
 }
 
 func toolInfoWithPath() *schema.ToolInfo {

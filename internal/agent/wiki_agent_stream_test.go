@@ -164,6 +164,16 @@ func TestStreamMarksElapsedLimit(t *testing.T) {
 	}
 }
 
+func TestStreamPropagatesExternalCancellation(t *testing.T) {
+	a := &WikiAgent{agent: timeoutFixtureAgent{}, maxElapsed: testMaxElapsed}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := a.Stream(ctx, "问题", func(string) error { return nil })
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancel error = %v, want context canceled", err)
+	}
+}
+
 func TestConsumeMessageStopsWhenContextCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

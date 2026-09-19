@@ -323,3 +323,47 @@ func TestDifferentConversationsRunConcurrently(t *testing.T) {
 		}
 	}
 }
+
+func TestProjectCanBeReadWhileConversationRuns(t *testing.T) {
+	fake := &blockingWikiAgent{entered: make(chan struct{}, 1), release: make(chan struct{})}
+	handler := New(fake).Handler()
+	root := t.TempDir()
+	open := httptest.NewRequest("POST", "/api/project", strings.NewReader(fmt.Sprintf(`{"root":%q}`, root)))
+	open.Header.Set("Content-Type", "application/json")
+	open.Header.Set("X-Conversation-ID", "one")
+	opened := httptest.NewRecorder()
+	handler.ServeHTTP(opened, open)
+	if opened.Code != 200 {
+		t.Fatalf("open: %d", opened.Code)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		req := httptest.NewRequest("POST", "/api/chat/stream", strings.NewReader(`{"message":"hello"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Conversation-ID", "one")
+		result := httptest.NewRecorder()
+		handler.ServeHTTP(result, req)
+		if result.Code != 200 {
+			t.Errorf("chat: %d", result.Code)
+		}
+	}()
+	select {
+	case <-fake.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("chat did not start")
+	}
+	project := httptest.NewRequest("GET", "/api/project", nil)
+	project.Header.Set("X-Conversation-ID", "one")
+	read := httptest.NewRecorder()
+	handler.ServeHTTP(read, project)
+	if read.Code != 200 || !strings.Contains(read.Body.String(), root) {
+		t.Fatalf("project during chat: %d %s", read.Code, read.Body.String())
+	}
+	close(fake.release)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("chat did not finish")
+	}
+}
