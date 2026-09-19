@@ -99,10 +99,12 @@ func (a *WikiAgent) Stream(ctx context.Context, request string, onText func(stri
 	// Run 启动 EINO 的「模型 → 如需工具则执行工具 → 再次调用模型」循环。
 	// Next 取的是 Agent 事件；一个事件里还可能有需要逐段 Recv 的 MessageStream。
 	// 路径不再由注册层改写；将本轮目录作为上下文交给模型，不写入共享 Agent。
+	metadata := runcontext.From(ctx)
 	messages := []*schema.Message{
-		schema.SystemMessage(fmt.Sprintf("本轮 Wiki 根目录：%q", runcontext.From(ctx).WikiRoot)),
-		schema.UserMessage(request),
+		schema.SystemMessage(fmt.Sprintf("本轮 Wiki 根目录：%q", metadata.WikiRoot)),
 	}
+	messages = append(messages, metadata.History...)
+	messages = append(messages, schema.UserMessage(request))
 	iter := runner.Run(ctx, messages)
 	var answer string
 	for {

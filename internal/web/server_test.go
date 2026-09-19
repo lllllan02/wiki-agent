@@ -16,8 +16,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cloudwego/eino/schema"
 	"github.com/lllllan02/wiki-agent/internal/agent"
 	"github.com/lllllan02/wiki-agent/internal/runcontext"
+	"github.com/lllllan02/wiki-agent/internal/store"
 )
 
 type progressAgent struct{ release chan struct{} }
@@ -33,6 +35,13 @@ func (a *progressAgent) Stream(_ context.Context, _ string, onText func(string) 
 	return &agent.Result{Answer: "# 完成"}, nil
 }
 
+func newTestServer(t *testing.T, wikiAgent WikiAgent) *Server {
+	t.Helper()
+	s := New(wikiAgent)
+	s.sessions = store.NewIn(t.TempDir())
+	return s
+}
+
 func TestStreamChatFlushesBeforeCompletion(t *testing.T) {
 	fake := &progressAgent{release: make(chan struct{})}
 	defer func() {
@@ -42,7 +51,7 @@ func TestStreamChatFlushesBeforeCompletion(t *testing.T) {
 			close(fake.release)
 		}
 	}()
-	srv := httptest.NewServer(New(fake).Handler())
+	srv := httptest.NewServer(newTestServer(t, fake).Handler())
 	defer srv.Close()
 	root := t.TempDir()
 	open, _ := http.NewRequest("POST", srv.URL+"/api/project", strings.NewReader(fmt.Sprintf(`{"root":%q}`, root)))
@@ -54,6 +63,16 @@ func TestStreamChatFlushesBeforeCompletion(t *testing.T) {
 	opened.Body.Close()
 	if opened.StatusCode != 200 {
 		t.Fatalf("open: %d", opened.StatusCode)
+	}
+	create, _ := http.NewRequest("POST", srv.URL+"/api/sessions", nil)
+	create.Header.Set("X-Conversation-ID", "window-a")
+	created, err := http.DefaultClient.Do(create)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created.Body.Close()
+	if created.StatusCode != 200 {
+		t.Fatalf("create session: %d", created.StatusCode)
 	}
 	req, _ := http.NewRequest("POST", srv.URL+"/api/chat/stream", strings.NewReader(`{"message":"question"}`))
 	req.Header.Set("X-Conversation-ID", "window-a")
@@ -95,7 +114,7 @@ func TestStreamChatFlushesBeforeCompletion(t *testing.T) {
 
 func TestPickProject(t *testing.T) {
 	root := t.TempDir()
-	s := New(&fakeWikiAgent{})
+	s := newTestServer(t, &fakeWikiAgent{})
 	s.pickDirectory = func(context.Context) (string, error) { return root, nil }
 	handler := s.Handler()
 	request := func(id string) *httptest.ResponseRecorder {
@@ -133,7 +152,7 @@ func (markdownAgent) Stream(_ context.Context, _ string, onText func(string) err
 }
 
 func TestChatRendersSafeMarkdown(t *testing.T) {
-	s := New(markdownAgent{})
+	s := newTestServer(t, markdownAgent{})
 	handler := s.Handler()
 	root := t.TempDir()
 	open := httptest.NewRequest("POST", "/api/project", strings.NewReader(fmt.Sprintf(`{"root":%q}`, root)))
@@ -142,6 +161,13 @@ func TestChatRendersSafeMarkdown(t *testing.T) {
 	handler.ServeHTTP(opened, open)
 	if opened.Code != 200 {
 		t.Fatalf("open: %d", opened.Code)
+	}
+	create := httptest.NewRequest("POST", "/api/sessions", nil)
+	create.Header.Set("X-Conversation-ID", "window-a")
+	created := httptest.NewRecorder()
+	handler.ServeHTTP(created, create)
+	if created.Code != 200 {
+		t.Fatalf("create session: %d", created.Code)
 	}
 	req := httptest.NewRequest("POST", "/api/chat/stream", strings.NewReader(`{"message":"question"}`))
 	req.Header.Set("X-Conversation-ID", "window-a")
@@ -162,19 +188,21 @@ func TestChatRendersSafeMarkdown(t *testing.T) {
 type fakeWikiAgent struct {
 	roots    []string
 	sessions []string
+	history  [][]*schema.Message
 }
 
 func (a *fakeWikiAgent) Stream(ctx context.Context, question string, onText func(string) error) (*agent.Result, error) {
 	metadata := runcontext.From(ctx)
 	a.roots = append(a.roots, metadata.WikiRoot)
 	a.sessions = append(a.sessions, metadata.SessionID)
+	a.history = append(a.history, append([]*schema.Message(nil), metadata.History...))
 	result := &agent.Result{Answer: "回答：" + question}
 	return result, onText(result.Answer)
 }
 func TestProjectSelectionAndRunContext(t *testing.T) {
 	fake := &fakeWikiAgent{}
 	one, two := t.TempDir(), t.TempDir()
-	srv := httptest.NewServer(New(fake).Handler())
+	srv := httptest.NewServer(newTestServer(t, fake).Handler())
 	defer srv.Close()
 	call := func(method, path, id, body string) (int, map[string]any) {
 		req, _ := http.NewRequest(method, srv.URL+path, strings.NewReader(body))
@@ -216,23 +244,146 @@ func TestProjectSelectionAndRunContext(t *testing.T) {
 	if status, _ := call("POST", "/api/chat/stream", "window-a", `{"message":"hello"}`); status != 400 {
 		t.Fatal("chat without project accepted")
 	}
-	if status, result := call("POST", "/api/project", "window-a", fmt.Sprintf(`{"root":%q}`, one)); status != 200 || result["root"] != one {
+	status, result := call("POST", "/api/project", "window-a", fmt.Sprintf(`{"root":%q}`, one))
+	if status != 200 || result["root"] != one || result["session_id"] != nil {
 		t.Fatalf("open: %d %+v", status, result)
 	}
+	status, result = call("POST", "/api/sessions", "window-a", "")
+	if status != 200 || result["session_id"] == "" {
+		t.Fatalf("create session: %d %+v", status, result)
+	}
+	firstSession := result["session_id"].(string)
 	call("POST", "/api/chat/stream", "window-a", `{"message":"first"}`)
 	call("POST", "/api/chat/stream", "window-a", `{"message":"second"}`)
-	if fake.sessions[0] != "window-a" || fake.sessions[1] != "window-a" || fake.roots[1] != one {
+	if fake.sessions[0] != firstSession || fake.sessions[1] != firstSession || fake.roots[1] != one {
 		t.Fatalf("session/roots: %v %v", fake.sessions, fake.roots)
 	}
-	call("POST", "/api/project", "window-a", fmt.Sprintf(`{"root":%q}`, two))
+	status, result = call("POST", "/api/project", "window-a", fmt.Sprintf(`{"root":%q}`, two))
+	if status != 200 || result["session_id"] != nil {
+		t.Fatalf("switch session: %d %+v", status, result)
+	}
+	status, result = call("POST", "/api/sessions", "window-a", "")
+	if status != 200 || result["session_id"] == "" || result["session_id"] == firstSession {
+		t.Fatalf("create switched session: %d %+v", status, result)
+	}
+	secondSession := result["session_id"].(string)
 	call("POST", "/api/chat/stream", "window-a", `{"message":"new wiki"}`)
-	if fake.sessions[2] != "window-a" || fake.roots[2] != two {
+	if fake.sessions[2] != secondSession || fake.roots[2] != two {
 		t.Fatalf("switch context: %v %v", fake.sessions, fake.roots)
 	}
-	call("POST", "/api/project", "window-b", fmt.Sprintf(`{"root":%q}`, one))
+	status, result = call("POST", "/api/project", "window-b", fmt.Sprintf(`{"root":%q}`, one))
+	if status != 200 || result["session_id"] != nil {
+		t.Fatalf("other window session: %d %+v", status, result)
+	}
+	status, result = call("POST", "/api/sessions", "window-b", "")
+	if status != 200 || result["session_id"] == "" || result["session_id"] == firstSession {
+		t.Fatalf("create other window session: %d %+v", status, result)
+	}
+	otherSession := result["session_id"].(string)
 	call("POST", "/api/chat/stream", "window-b", `{"message":"other window"}`)
-	if fake.sessions[3] != "window-b" || fake.roots[3] != one {
+	if fake.sessions[3] != otherSession || fake.roots[3] != one {
 		t.Fatalf("window mixed state: %v %v", fake.sessions, fake.roots)
+	}
+}
+
+func TestChatPersistsMessagesAsJSONL(t *testing.T) {
+	root := t.TempDir()
+	s := newTestServer(t, &fakeWikiAgent{})
+	handler := s.Handler()
+	open := httptest.NewRequest("POST", "/api/project", strings.NewReader(fmt.Sprintf(`{"root":%q}`, root)))
+	open.Header.Set("Content-Type", "application/json")
+	open.Header.Set("X-Conversation-ID", "window-a")
+	opened := httptest.NewRecorder()
+	handler.ServeHTTP(opened, open)
+	if opened.Code != 200 {
+		t.Fatalf("open: %d", opened.Code)
+	}
+	var project projectResponse
+	if err := json.Unmarshal(opened.Body.Bytes(), &project); err != nil {
+		t.Fatal(err)
+	}
+	if project.NodeID != store.NodeID(root) {
+		t.Fatalf("node id: %+v", project)
+	}
+	create := httptest.NewRequest("POST", "/api/sessions", nil)
+	create.Header.Set("X-Conversation-ID", "window-a")
+	created := httptest.NewRecorder()
+	handler.ServeHTTP(created, create)
+	if created.Code != 200 {
+		t.Fatalf("create session: %d %s", created.Code, created.Body.String())
+	}
+	var createdSession sessionResponse
+	if err := json.Unmarshal(created.Body.Bytes(), &createdSession); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest("POST", "/api/chat/stream", strings.NewReader(`{"message":"persist me"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Conversation-ID", "window-a")
+	result := httptest.NewRecorder()
+	handler.ServeHTTP(result, req)
+	if result.Code != 200 {
+		t.Fatalf("chat: %d %s", result.Code, result.Body.String())
+	}
+	messages, err := s.sessions.LoadMessages(root, createdSession.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) != 2 || messages[0].Role != "user" || messages[0].Content != "persist me" || messages[1].Role != "assistant" || messages[1].Content != "回答：persist me" {
+		t.Fatalf("messages: %+v", messages)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".wiki-agent")); !os.IsNotExist(err) {
+		t.Fatalf("knowledge base was not kept clean: %v", err)
+	}
+	history := httptest.NewRequest("GET", "/api/chat/messages", nil)
+	history.Header.Set("X-Conversation-ID", "window-a")
+	historyResult := httptest.NewRecorder()
+	handler.ServeHTTP(historyResult, history)
+	if historyResult.Code != 200 {
+		t.Fatalf("history: %d %s", historyResult.Code, historyResult.Body.String())
+	}
+	var restored messagesResponse
+	if err := json.Unmarshal(historyResult.Body.Bytes(), &restored); err != nil {
+		t.Fatal(err)
+	}
+	if len(restored.Messages) != 2 || restored.Messages[0].Role != "user" || restored.Messages[0].Content != "persist me" || restored.Messages[1].Role != "assistant" || !strings.Contains(restored.Messages[1].HTML, "回答：persist me") {
+		t.Fatalf("restored messages: %+v", restored.Messages)
+	}
+	second := httptest.NewRequest("POST", "/api/chat/stream", strings.NewReader(`{"message":"follow up"}`))
+	second.Header.Set("Content-Type", "application/json")
+	second.Header.Set("X-Conversation-ID", "window-a")
+	secondResult := httptest.NewRecorder()
+	handler.ServeHTTP(secondResult, second)
+	if secondResult.Code != 200 {
+		t.Fatalf("second chat: %d %s", secondResult.Code, secondResult.Body.String())
+	}
+	fake := s.agent.(*fakeWikiAgent)
+	if len(fake.history) != 2 || len(fake.history[1]) != 2 || fake.history[1][0].Role != schema.User || fake.history[1][0].Content != "persist me" || fake.history[1][1].Role != schema.Assistant || fake.history[1][1].Content != "回答：persist me" {
+		t.Fatalf("agent did not receive stored history: %+v", fake.history)
+	}
+	list := httptest.NewRequest("GET", "/api/sessions", nil)
+	list.Header.Set("X-Conversation-ID", "window-a")
+	listed := httptest.NewRecorder()
+	handler.ServeHTTP(listed, list)
+	var listedSessions sessionResponse
+	if err := json.Unmarshal(listed.Body.Bytes(), &listedSessions); err != nil {
+		t.Fatal(err)
+	}
+	if listed.Code != 200 || len(listedSessions.Sessions) != 1 || listedSessions.Sessions[0].ID != createdSession.SessionID || listedSessions.Sessions[0].MessageCount != 4 {
+		t.Fatalf("sessions: %d %+v", listed.Code, listedSessions)
+	}
+	del := httptest.NewRequest("DELETE", "/api/sessions/"+createdSession.SessionID, nil)
+	del.Header.Set("X-Conversation-ID", "window-a")
+	deleted := httptest.NewRecorder()
+	handler.ServeHTTP(deleted, del)
+	if deleted.Code != 200 {
+		t.Fatalf("delete session: %d %s", deleted.Code, deleted.Body.String())
+	}
+	history = httptest.NewRequest("GET", "/api/chat/messages", nil)
+	history.Header.Set("X-Conversation-ID", "window-a")
+	historyResult = httptest.NewRecorder()
+	handler.ServeHTTP(historyResult, history)
+	if historyResult.Code != 400 {
+		t.Fatalf("history after delete: %d", historyResult.Code)
 	}
 }
 func TestProjectAndChatValidation(t *testing.T) {
@@ -241,7 +392,7 @@ func TestProjectAndChatValidation(t *testing.T) {
 	if err := os.WriteFile(file, []byte("note"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(New(&fakeWikiAgent{}).Handler())
+	srv := httptest.NewServer(newTestServer(t, &fakeWikiAgent{}).Handler())
 	defer srv.Close()
 	for _, item := range []struct{ path, body, id string }{
 		{"/api/project", `{"root":"/wiki"}`, ""},
@@ -268,7 +419,7 @@ func TestProjectAndChatValidation(t *testing.T) {
 	legacy := httptest.NewRequest("POST", "/api/chat", strings.NewReader(`{"message":"hello"}`))
 	legacy.Header.Set("X-Conversation-ID", "window-a")
 	result := httptest.NewRecorder()
-	New(&fakeWikiAgent{}).Handler().ServeHTTP(result, legacy)
+	newTestServer(t, &fakeWikiAgent{}).Handler().ServeHTTP(result, legacy)
 	if result.Code != http.StatusNotFound {
 		t.Fatalf("legacy chat route still enabled: %d", result.Code)
 	}
@@ -287,7 +438,7 @@ func (a *blockingWikiAgent) Stream(_ context.Context, _ string, onText func(stri
 }
 func TestDifferentConversationsRunConcurrently(t *testing.T) {
 	fake := &blockingWikiAgent{entered: make(chan struct{}, 2), release: make(chan struct{})}
-	handler := New(fake).Handler()
+	handler := newTestServer(t, fake).Handler()
 	root := t.TempDir()
 	for _, id := range []string{"one", "two"} {
 		req := httptest.NewRequest("POST", "/api/project", strings.NewReader(fmt.Sprintf(`{"root":%q}`, root)))
@@ -297,6 +448,13 @@ func TestDifferentConversationsRunConcurrently(t *testing.T) {
 		handler.ServeHTTP(result, req)
 		if result.Code != 200 {
 			t.Fatalf("open %s: %d", id, result.Code)
+		}
+		create := httptest.NewRequest("POST", "/api/sessions", nil)
+		create.Header.Set("X-Conversation-ID", id)
+		created := httptest.NewRecorder()
+		handler.ServeHTTP(created, create)
+		if created.Code != 200 {
+			t.Fatalf("create session %s: %d", id, created.Code)
 		}
 	}
 	var wg sync.WaitGroup
@@ -326,7 +484,7 @@ func TestDifferentConversationsRunConcurrently(t *testing.T) {
 
 func TestProjectCanBeReadWhileConversationRuns(t *testing.T) {
 	fake := &blockingWikiAgent{entered: make(chan struct{}, 1), release: make(chan struct{})}
-	handler := New(fake).Handler()
+	handler := newTestServer(t, fake).Handler()
 	root := t.TempDir()
 	open := httptest.NewRequest("POST", "/api/project", strings.NewReader(fmt.Sprintf(`{"root":%q}`, root)))
 	open.Header.Set("Content-Type", "application/json")
@@ -335,6 +493,13 @@ func TestProjectCanBeReadWhileConversationRuns(t *testing.T) {
 	handler.ServeHTTP(opened, open)
 	if opened.Code != 200 {
 		t.Fatalf("open: %d", opened.Code)
+	}
+	create := httptest.NewRequest("POST", "/api/sessions", nil)
+	create.Header.Set("X-Conversation-ID", "one")
+	created := httptest.NewRecorder()
+	handler.ServeHTTP(created, create)
+	if created.Code != 200 {
+		t.Fatalf("create session: %d", created.Code)
 	}
 	done := make(chan struct{})
 	go func() {

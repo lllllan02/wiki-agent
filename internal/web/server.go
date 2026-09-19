@@ -18,6 +18,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/lllllan02/wiki-agent/internal/agent"
 	"github.com/lllllan02/wiki-agent/internal/runcontext"
+	"github.com/lllllan02/wiki-agent/internal/store"
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/extension"
 )
@@ -33,11 +34,13 @@ type Server struct {
 	mu            sync.Mutex
 	conversations map[string]*conversationState
 	pickDirectory func(context.Context) (string, error)
+	sessions      *store.Store
 }
 type conversationState struct {
-	mu    sync.Mutex
-	root  string
-	inbox chan *chatJob
+	mu        sync.Mutex
+	root      string
+	sessionID string
+	inbox     chan *chatJob
 }
 type chatJob struct {
 	ctx     context.Context
@@ -53,7 +56,7 @@ type chatResult struct {
 }
 
 func New(wikiAgent WikiAgent) *Server {
-	return &Server{agent: wikiAgent, conversations: make(map[string]*conversationState), pickDirectory: systemDirectoryPicker}
+	return &Server{agent: wikiAgent, conversations: make(map[string]*conversationState), pickDirectory: systemDirectoryPicker, sessions: store.New()}
 }
 func (s *Server) Handler() *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
@@ -66,6 +69,11 @@ func (s *Server) Handler() *gin.Engine {
 	router.GET("/api/project", s.project)
 	router.POST("/api/project", s.openProject)
 	router.POST("/api/project/pick", s.pickProject)
+	router.GET("/api/sessions", s.listSessions)
+	router.POST("/api/sessions", s.createSession)
+	router.POST("/api/sessions/select", s.selectSession)
+	router.DELETE("/api/sessions/:session", s.deleteSession)
+	router.GET("/api/chat/messages", s.chatMessages)
 	router.POST("/api/chat/stream", s.streamChat)
 	return router
 }
@@ -74,14 +82,34 @@ type projectRequest struct {
 	Root string `json:"root"`
 }
 type projectResponse struct {
-	Root  string `json:"root,omitempty"`
-	Error string `json:"error,omitempty"`
+	Root      string `json:"root,omitempty"`
+	SessionID string `json:"session_id,omitempty"`
+	NodeID    string `json:"node_id,omitempty"`
+	Error     string `json:"error,omitempty"`
 }
 type chatRequest struct {
 	Message string `json:"message"`
 }
 type chatResponse struct {
 	Error string `json:"error,omitempty"`
+}
+type sessionRequest struct {
+	SessionID string `json:"session_id"`
+}
+type sessionResponse struct {
+	SessionID string          `json:"session_id,omitempty"`
+	NodeID    string          `json:"node_id,omitempty"`
+	Sessions  []store.Session `json:"sessions,omitempty"`
+	Error     string          `json:"error,omitempty"`
+}
+type messageResponse struct {
+	Role    string `json:"role"`
+	Content string `json:"content,omitempty"`
+	HTML    string `json:"html,omitempty"`
+}
+type messagesResponse struct {
+	Messages []messageResponse `json:"messages,omitempty"`
+	Error    string            `json:"error,omitempty"`
 }
 
 func (s *Server) project(c *gin.Context) {
@@ -93,8 +121,13 @@ func (s *Server) project(c *gin.Context) {
 	state := s.state(id)
 	state.mu.Lock()
 	root := state.root
+	sessionID := state.sessionID
 	state.mu.Unlock()
-	c.JSON(200, projectResponse{Root: root})
+	response := projectResponse{Root: root, SessionID: sessionID}
+	if root != "" {
+		response.NodeID = store.NodeID(root)
+	}
+	c.JSON(200, response)
 }
 func (s *Server) openProject(c *gin.Context) {
 	id := conversationID(c)
@@ -145,7 +178,163 @@ func (s *Server) setProject(c *gin.Context, id, requestedRoot string) {
 		return
 	}
 	state.root = root
-	c.JSON(200, projectResponse{Root: root})
+	state.sessionID = ""
+	c.JSON(200, projectResponse{Root: root, NodeID: store.NodeID(root)})
+}
+
+func (s *Server) listSessions(c *gin.Context) {
+	root, ok := s.currentRoot(c)
+	if !ok {
+		return
+	}
+	sessions, err := s.sessions.ListSessions(root)
+	if err != nil {
+		c.JSON(500, sessionResponse{Error: friendlyError(err)})
+		return
+	}
+	c.JSON(200, sessionResponse{NodeID: store.NodeID(root), Sessions: sessions})
+}
+
+func (s *Server) createSession(c *gin.Context) {
+	id := conversationID(c)
+	if id == "" {
+		c.JSON(400, sessionResponse{Error: "请提供有效的 X-Conversation-ID"})
+		return
+	}
+	root, ok := s.currentRoot(c)
+	if !ok {
+		return
+	}
+	sessionID := store.NewSessionID()
+	if err := s.sessions.CreateSession(root, sessionID); err != nil {
+		c.JSON(500, sessionResponse{Error: friendlyError(err)})
+		return
+	}
+	state := s.state(id)
+	state.mu.Lock()
+	state.sessionID = sessionID
+	state.mu.Unlock()
+	c.JSON(200, sessionResponse{SessionID: sessionID, NodeID: store.NodeID(root)})
+}
+
+func (s *Server) selectSession(c *gin.Context) {
+	id := conversationID(c)
+	if id == "" {
+		c.JSON(400, sessionResponse{Error: "请提供有效的 X-Conversation-ID"})
+		return
+	}
+	root, ok := s.currentRoot(c)
+	if !ok {
+		return
+	}
+	var req sessionRequest
+	if err := c.ShouldBindJSON(&req); err != nil || strings.TrimSpace(req.SessionID) == "" {
+		c.JSON(400, sessionResponse{Error: "请选择有效的对话"})
+		return
+	}
+	sessions, err := s.sessions.ListSessions(root)
+	if err != nil {
+		c.JSON(500, sessionResponse{Error: friendlyError(err)})
+		return
+	}
+	found := false
+	for _, session := range sessions {
+		if session.ID == req.SessionID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		c.JSON(404, sessionResponse{Error: "对话不存在"})
+		return
+	}
+	state := s.state(id)
+	state.mu.Lock()
+	state.sessionID = req.SessionID
+	state.mu.Unlock()
+	c.JSON(200, sessionResponse{SessionID: req.SessionID, NodeID: store.NodeID(root)})
+}
+
+func (s *Server) deleteSession(c *gin.Context) {
+	id := conversationID(c)
+	if id == "" {
+		c.JSON(400, sessionResponse{Error: "请提供有效的 X-Conversation-ID"})
+		return
+	}
+	root, ok := s.currentRoot(c)
+	if !ok {
+		return
+	}
+	sessionID := c.Param("session")
+	if err := s.sessions.DeleteSession(root, sessionID); err != nil {
+		c.JSON(400, sessionResponse{Error: friendlyError(err)})
+		return
+	}
+	state := s.state(id)
+	state.mu.Lock()
+	if state.sessionID == sessionID {
+		state.sessionID = ""
+	}
+	state.mu.Unlock()
+	c.JSON(200, sessionResponse{NodeID: store.NodeID(root)})
+}
+
+func (s *Server) chatMessages(c *gin.Context) {
+	id := conversationID(c)
+	if id == "" {
+		c.JSON(400, messagesResponse{Error: "请提供有效的 X-Conversation-ID"})
+		return
+	}
+	state := s.state(id)
+	state.mu.Lock()
+	root := state.root
+	sessionID := state.sessionID
+	state.mu.Unlock()
+	if root == "" || sessionID == "" {
+		c.JSON(400, messagesResponse{Error: "请先打开知识库目录"})
+		return
+	}
+	messages, err := s.sessions.LoadMessages(root, sessionID)
+	if err != nil {
+		c.JSON(500, messagesResponse{Error: friendlyError(err)})
+		return
+	}
+	response := messagesResponse{Messages: make([]messageResponse, 0, len(messages))}
+	for _, message := range messages {
+		item := messageResponse{Role: message.Role}
+		switch message.Role {
+		case "user":
+			item.Content = message.Content
+		case "assistant":
+			html, err := renderMarkdown(message.Content)
+			if err != nil {
+				c.JSON(500, messagesResponse{Error: "回答渲染失败"})
+				return
+			}
+			item.HTML = html
+		default:
+			continue
+		}
+		response.Messages = append(response.Messages, item)
+	}
+	c.JSON(200, response)
+}
+
+func (s *Server) currentRoot(c *gin.Context) (string, bool) {
+	id := conversationID(c)
+	if id == "" {
+		c.JSON(400, sessionResponse{Error: "请提供有效的 X-Conversation-ID"})
+		return "", false
+	}
+	state := s.state(id)
+	state.mu.Lock()
+	root := state.root
+	state.mu.Unlock()
+	if root == "" {
+		c.JSON(400, sessionResponse{Error: "请先打开知识库目录"})
+		return "", false
+	}
+	return root, true
 }
 
 type streamEvent struct {
@@ -168,8 +357,9 @@ func (s *Server) streamChat(c *gin.Context) {
 	state := s.state(id)
 	state.mu.Lock()
 	root := state.root
+	sessionID := state.sessionID
 	state.mu.Unlock()
-	if root == "" {
+	if root == "" || sessionID == "" {
 		c.JSON(400, chatResponse{Error: "请先打开知识库目录"})
 		return
 	}
@@ -197,7 +387,7 @@ func (s *Server) streamChat(c *gin.Context) {
 	job := &chatJob{
 		ctx:     c.Request.Context(),
 		root:    root,
-		session: id,
+		session: sessionID,
 		message: strings.TrimSpace(req.Message),
 		onText:  onText,
 		done:    make(chan chatResult, 1),
@@ -260,8 +450,30 @@ func (s *Server) state(id string) *conversationState {
 }
 func (s *Server) runConversation(state *conversationState) {
 	for job := range state.inbox {
-		ctx := runcontext.With(job.ctx, runcontext.Metadata{SessionID: job.session, WikiRoot: job.root})
+		history, err := s.sessions.LoadAgentHistory(job.root, job.session)
+		if err != nil {
+			job.done <- chatResult{err: err}
+			continue
+		}
+		if err := s.sessions.AppendMessage(job.root, store.Message{
+			ID:        store.NewMessageID(),
+			SessionID: job.session,
+			Role:      "user",
+			Content:   job.message,
+		}); err != nil {
+			job.done <- chatResult{err: err}
+			continue
+		}
+		ctx := runcontext.With(job.ctx, runcontext.Metadata{SessionID: job.session, WikiRoot: job.root, History: history})
 		result, err := s.agent.Stream(ctx, job.message, job.onText)
+		if err == nil && result != nil {
+			err = s.sessions.AppendMessage(job.root, store.Message{
+				ID:        store.NewMessageID(),
+				SessionID: job.session,
+				Role:      "assistant",
+				Content:   result.Answer,
+			})
+		}
 		job.done <- chatResult{result: result, err: err}
 	}
 }

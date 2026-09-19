@@ -12,3 +12,5 @@
 /mcp/node_modules/
 /mcp.local.yaml
 /var/
+
+.wiki-agent

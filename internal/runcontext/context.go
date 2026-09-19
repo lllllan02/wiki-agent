@@ -6,13 +6,15 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"time"
+
+	"github.com/cloudwego/eino/schema"
 )
 
-// Metadata 不包含消息历史；未来由 Agent 按 SessionID 从存储中读取历史。
 type Metadata struct {
 	SessionID string
 	WikiRoot  string
 	RunID     string
+	History   []*schema.Message
 }
 
 type metadataKey struct{}
