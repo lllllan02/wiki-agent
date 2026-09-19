@@ -16,11 +16,60 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/schema"
 	"github.com/lllllan02/wiki-agent/internal/agent"
 	"github.com/lllllan02/wiki-agent/internal/runcontext"
 	"github.com/lllllan02/wiki-agent/internal/store"
 )
+
+type checkpointStubAgent struct{}
+
+func (*checkpointStubAgent) Stream(context.Context, string, func(string) error) (*agent.Result, error) {
+	return nil, errors.New("unexpected plain stream")
+}
+
+func (*checkpointStubAgent) StreamWithCheckPoint(context.Context, string, string, adk.CheckPointStore, func(string) error, agent.CancelRegistrar) (*agent.Result, error) {
+	return nil, errors.New("unexpected checkpoint stream")
+}
+
+func (*checkpointStubAgent) ResumeWithCheckPoint(context.Context, string, adk.CheckPointStore, func(string) error, agent.CancelRegistrar) (*agent.Result, error) {
+	return nil, errors.New("unexpected resume")
+}
+
+func TestPausedStateRequiresSavedCheckpoint(t *testing.T) {
+	s := newTestServer(t, &checkpointStubAgent{})
+	root, sessionID := t.TempDir(), store.NewSessionID()
+	if err := s.sessions.CreateSession(root, sessionID); err != nil {
+		t.Fatal(err)
+	}
+	requestPause := func() {
+		t.Helper()
+		if err := s.applyImmediateControl(root, sessionID, intentPause); err != nil {
+			t.Fatal(err)
+		}
+	}
+	checkpointID := s.sessions.CheckPointID(root, sessionID)
+	requestPause()
+	if err := s.markStoppedAfterCancel(root, sessionID, true, checkpointID); err == nil {
+		t.Fatal("reported a resumable pause without a checkpoint")
+	}
+	state, err := s.sessions.LoadSessionState(root, sessionID)
+	if err != nil || state.RunStatus != store.RunStatusFailed || state.PauseStatus != store.PauseStatusNone {
+		t.Fatalf("missing checkpoint state: %+v, %v", state, err)
+	}
+	requestPause()
+	if err := s.sessions.Set(context.Background(), checkpointID, []byte("checkpoint")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.markStoppedAfterCancel(root, sessionID, true, checkpointID); err != nil {
+		t.Fatal(err)
+	}
+	state, err = s.sessions.LoadSessionState(root, sessionID)
+	if err != nil || state.RunStatus != store.RunStatusPaused || state.PauseStatus != store.PauseStatusPaused {
+		t.Fatalf("saved checkpoint state: %+v, %v", state, err)
+	}
+}
 
 type progressAgent struct{ release chan struct{} }
 
@@ -436,6 +485,98 @@ func (a *blockingWikiAgent) Stream(_ context.Context, _ string, onText func(stri
 	result := &agent.Result{Answer: "ok"}
 	return result, onText(result.Answer)
 }
+
+type cancelAwareAgent struct {
+	entered chan struct{}
+	stopped chan struct{}
+}
+
+func (a *cancelAwareAgent) Stream(ctx context.Context, _ string, onText func(string) error) (*agent.Result, error) {
+	a.entered <- struct{}{}
+	_ = onText("working")
+	<-ctx.Done()
+	close(a.stopped)
+	return nil, ctx.Err()
+}
+
+func TestPauseCancelsCurrentRunAndPersistsState(t *testing.T) {
+	fake := &cancelAwareAgent{entered: make(chan struct{}, 1), stopped: make(chan struct{})}
+	s := newTestServer(t, fake)
+	handler := s.Handler()
+	root := t.TempDir()
+	open := httptest.NewRequest("POST", "/api/project", strings.NewReader(fmt.Sprintf(`{"root":%q}`, root)))
+	open.Header.Set("Content-Type", "application/json")
+	open.Header.Set("X-Conversation-ID", "one")
+	opened := httptest.NewRecorder()
+	handler.ServeHTTP(opened, open)
+	if opened.Code != 200 {
+		t.Fatalf("open: %d", opened.Code)
+	}
+	create := httptest.NewRequest("POST", "/api/sessions", nil)
+	create.Header.Set("X-Conversation-ID", "one")
+	created := httptest.NewRecorder()
+	handler.ServeHTTP(created, create)
+	if created.Code != 200 {
+		t.Fatalf("create session: %d", created.Code)
+	}
+	var createdSession sessionResponse
+	if err := json.Unmarshal(created.Body.Bytes(), &createdSession); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		req := httptest.NewRequest("POST", "/api/chat/stream", strings.NewReader(`{"message":"hello"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Conversation-ID", "one")
+		result := httptest.NewRecorder()
+		handler.ServeHTTP(result, req)
+	}()
+	select {
+	case <-fake.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("chat did not start")
+	}
+	pause := httptest.NewRequest("POST", "/api/chat/pause", nil)
+	pause.Header.Set("X-Conversation-ID", "one")
+	paused := httptest.NewRecorder()
+	handler.ServeHTTP(paused, pause)
+	if paused.Code != 200 {
+		t.Fatalf("pause: %d %s", paused.Code, paused.Body.String())
+	}
+	select {
+	case <-fake.stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("run was not canceled")
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stream did not finish after pause")
+	}
+	state, err := s.sessions.LoadSessionState(root, createdSession.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.RunStatus != store.RunStatusPaused || state.PauseStatus != store.PauseStatusPaused || state.CurrentVisibleAnswer != "working" {
+		t.Fatalf("pause state: %+v", state)
+	}
+	resume := httptest.NewRequest("POST", "/api/chat/resume", nil)
+	resume.Header.Set("X-Conversation-ID", "one")
+	resumed := httptest.NewRecorder()
+	handler.ServeHTTP(resumed, resume)
+	if resumed.Code != 200 {
+		t.Fatalf("resume: %d %s", resumed.Code, resumed.Body.String())
+	}
+	state, err = s.sessions.LoadSessionState(root, createdSession.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.RunStatus != store.RunStatusIdle || state.PauseStatus != store.PauseStatusNone {
+		t.Fatalf("resume state: %+v", state)
+	}
+}
+
 func TestDifferentConversationsRunConcurrently(t *testing.T) {
 	fake := &blockingWikiAgent{entered: make(chan struct{}, 2), release: make(chan struct{})}
 	handler := newTestServer(t, fake).Handler()

@@ -11,7 +11,7 @@
     .top{display:flex;align-items:center;justify-content:space-between;gap:20px}h1{font-size:24px;letter-spacing:-.03em;margin:0}.subtitle{font-size:13px;color:#667085;margin:5px 0 0}
     .project{display:flex;align-items:center;gap:10px;min-width:0;flex-wrap:wrap}.project-current{min-width:0;max-width:280px;display:flex;align-items:center;gap:8px;padding:9px 12px;border:1px solid #e1e6ed;border-radius:12px;background:#fff;color:#475467;font-size:13px}
     .project-current span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.project-current svg{flex:none}
-    .project button,.composer button{border:0;border-radius:11px;background:#2563eb;color:#fff;font-weight:600;padding:10px 16px;white-space:nowrap}.project button:hover:not(:disabled),.composer button:hover:not(:disabled){background:#1d4ed8}.project button.secondary{background:#eef4ff;color:#175cd3}.project button.danger{background:#fff1f1;color:#b42318}
+    .project button,.composer button{border:0;border-radius:11px;background:#2563eb;color:#fff;font-weight:600;padding:10px 16px;white-space:nowrap}.project button:hover:not(:disabled),.composer button:hover:not(:disabled){background:#1d4ed8}.project button.secondary,.composer button.secondary{background:#eef4ff;color:#175cd3}.project button.danger,.composer button.danger{background:#fff1f1;color:#b42318}.composer button.neutral{background:#f2f4f7;color:#344054}
     .recent,.sessions{border:1px solid #e1e6ed;border-radius:10px;background:#fff;color:#475467;padding:9px 10px;max-width:220px;font-size:13px}.recent[hidden],.sessions[hidden]{display:none}
     .workspace{flex:1;min-height:540px;display:flex;flex-direction:column;background:#fff;border:1px solid #e4e9f0;border-radius:18px;box-shadow:0 12px 32px #26364a0a;overflow:hidden}
     .conversation{flex:1;min-height:370px;max-height:calc(100dvh - 255px);overflow-y:auto;padding:28px clamp(20px,5vw,56px);scroll-behavior:smooth}
@@ -27,7 +27,7 @@
     .markdown table{display:block;overflow-x:auto;border-collapse:collapse;max-width:100%}.markdown th,.markdown td{border:1px solid #dce3ec;padding:7px 11px;text-align:left;white-space:nowrap}.markdown th{background:#f5f7fa}.markdown img{max-width:100%;height:auto}.markdown hr{border:0;border-top:1px solid #e4e9f0;margin:1.5em 0}
     .notice{margin:0 0 22px;padding:10px 14px;border-radius:10px;background:#eff8f2;color:#26704a;font-size:13px;overflow-wrap:anywhere}.notice.error{background:#fff1f1;color:#b42318}
     .composer-wrap{border-top:1px solid #edf0f4;padding:16px clamp(16px,4vw,40px) 14px;background:#fff}.composer{display:flex;align-items:flex-end;gap:12px;padding:8px;border:1px solid #d8e0e9;border-radius:14px;box-shadow:0 2px 8px #1d293905}.composer:focus-within{border-color:#6a9df5;box-shadow:0 0 0 3px #2563eb18}
-    textarea{flex:1;min-width:0;min-height:42px;max-height:180px;resize:vertical;border:0;outline:0;padding:10px 8px;background:transparent;color:#1d2939;line-height:1.5}textarea::placeholder{color:#98a2b3}.composer button{min-width:66px;margin-bottom:1px}.tip{margin:10px 4px 0;color:#98a2b3;font-size:12px}
+    textarea{flex:1;min-width:0;min-height:42px;max-height:180px;resize:vertical;border:0;outline:0;padding:10px 8px;background:transparent;color:#1d2939;line-height:1.5}textarea::placeholder{color:#98a2b3}.composer-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end}.composer button{min-width:66px;margin-bottom:1px}.composer button[hidden]{display:none}.tip{margin:10px 4px 0;color:#98a2b3;font-size:12px}
     @media(max-width:720px){.app{padding:16px 12px;gap:12px}.top{align-items:flex-start;flex-direction:column}.project{width:100%;flex-wrap:wrap}.project-current{flex:1;max-width:none}.recent{max-width:100%}.workspace{min-height:calc(100dvh - 180px)}.conversation{max-height:none;padding:24px 18px}.user-bubble{max-width:90%}}
   </style>
 </head>
@@ -49,8 +49,8 @@
         <div id="empty" class="empty"><div class="empty-icon">✦</div><h2>从你的知识库开始</h2><p>选择一个本地目录，然后向 Wiki Agent 提问。</p></div>
       </div>
       <div class="composer-wrap">
-        <form id="form" class="composer"><textarea id="input" rows="1" placeholder="先选择知识库，再输入问题…" aria-label="输入问题" disabled required></textarea><button id="send" disabled>发送</button></form>
-        <p class="tip">Enter 发送 · Shift + Enter 换行 · 当前每次提问独立处理</p>
+        <form id="form" class="composer"><textarea id="input" rows="1" placeholder="先选择知识库，再输入问题…" aria-label="输入问题" disabled required></textarea><div class="composer-actions"><button id="send" type="submit" disabled>发送</button><button id="pauseRun" type="button" class="neutral" hidden disabled>暂停</button><button id="resumeRun" type="button" class="secondary" hidden disabled>继续</button><button id="cancelRun" type="button" class="danger" hidden disabled>取消</button></div></form>
+        <p class="tip">Enter 发送 · Shift + Enter 换行 · 运行中可追加要求或暂停</p>
       </div>
     </section>
   </main>
@@ -66,11 +66,17 @@
     const sessions=document.querySelector('#sessions');
     const newSession=document.querySelector('#newSession');
     const deleteSession=document.querySelector('#deleteSession');
+    const pauseRun=document.querySelector('#pauseRun');
+    const resumeRun=document.querySelector('#resumeRun');
+    const cancelRun=document.querySelector('#cancelRun');
     const conversationId=sessionStorage.getItem('wikiConversationId')||crypto.randomUUID();
     sessionStorage.setItem('wikiConversationId',conversationId);
     let activeRoot='';
     let activeSession='';
     let busy=false;
+    let activeStreams=0;
+    let runState='idle';
+    const controlPending=new Set();
     function scrollToBottom(){conversation.scrollTop=conversation.scrollHeight}
     function notice(message,error=false){
       empty?.remove();
@@ -112,13 +118,110 @@
     }
     function setBusy(value){
       busy=value;
-      send.disabled=value||!activeRoot||!activeSession;
-      input.disabled=value||!activeRoot||!activeSession;
+      const ready=!!activeRoot&&!!activeSession;
+      const textReady=input.value.trim().length>0;
+      send.hidden=runState==='paused'||runState==='pauseRequested'||runState==='cancelRequested';
+      pauseRun.hidden=runState!=='running';
+      resumeRun.hidden=runState!=='paused';
+      cancelRun.hidden=runState!=='running'&&runState!=='paused';
+      send.disabled=!ready||!textReady;
+      input.disabled=!activeRoot||!activeSession;
       pickProject.disabled=value;
       recentProjects.disabled=value;
       sessions.disabled=value||!activeRoot;
       newSession.disabled=value||!activeRoot;
       deleteSession.disabled=value||!activeRoot||!activeSession;
+      pauseRun.disabled=!ready||controlPending.has('pause')||runState!=='running';
+      resumeRun.disabled=!ready||controlPending.has('resume')||runState!=='paused';
+      cancelRun.disabled=!ready||controlPending.has('cancel')||!(runState==='running'||runState==='paused');
+    }
+    function setRunState(state){runState=state;setBusy(activeStreams>0)}
+    function resetRunState(){activeStreams=0;controlPending.clear();runState='idle';setBusy(false)}
+    function beginStream(){activeStreams++;if(runState==='idle'||runState==='paused')runState='running';setBusy(activeStreams>0)}
+    function endStream(){
+      activeStreams=Math.max(0,activeStreams-1);
+      if(activeStreams===0&&(runState==='running'||runState==='cancelRequested'))runState='idle';
+      setBusy(activeStreams>0);
+    }
+    async function control(action,path,label,nextState){
+      if(controlPending.has(action))return;
+      controlPending.add(action);
+      if(action==='pause')setRunState('pauseRequested');
+      if(action==='cancel')setRunState('cancelRequested');
+      setBusy(activeStreams>0);
+      try{
+        const res=await fetch(path,{method:'POST',headers:{'X-Conversation-ID':conversationId}});
+        const data=await res.json();
+        if(!res.ok||data.error)throw new Error(data.error||label+'失败');
+        setRunState(action==='cancel'&&activeStreams>0?'cancelRequested':nextState);
+        notice(label+'已接收');
+      }catch(err){
+        if(action==='pause')setRunState(activeStreams>0?'running':'idle');
+        if(action==='resume')setRunState('paused');
+        if(action==='cancel')setRunState(activeStreams>0?'running':'idle');
+        notice(err.message,true);
+      }finally{
+        controlPending.delete(action);
+        setBusy(activeStreams>0);
+      }
+    }
+    async function resumeTask(){
+      if(controlPending.has('resume')||!activeRoot||!activeSession)return;
+      controlPending.add('resume');
+      setBusy(activeStreams>0);
+      try{
+        setRunState('running');
+        await streamMessage('',{showUser:false,resume:true});
+      }catch(err){
+        setRunState('paused');
+        notice(err.message,true);
+      }finally{
+        controlPending.delete('resume');
+        setBusy(activeStreams>0);
+      }
+    }
+    async function streamMessage(message,{showUser=true,resume=false}={}){
+      if((!message&&!resume)||!activeRoot||!activeSession)return;
+      if(showUser)addUser(message);
+      beginStream();
+      const waiting=addAssistant('<p>正在处理…</p>');
+      let hasUpdate=false;
+      try{
+        const res=await fetch('/api/chat/stream',{method:'POST',headers:{'Content-Type':'application/json','X-Conversation-ID':conversationId},body:JSON.stringify({message,resume})});
+        if(!res.ok){const data=await res.json();throw new Error(data.error||'请求失败')}
+        if(!res.body)throw new Error('浏览器不支持流式读取');
+        const reader=res.body.getReader();
+        const decoder=new TextDecoder();
+        let pending='';let done=false;
+        // Go 每次 Flush 一行 JSON；网络读取可能把一行拆开或把多行合在一起。
+        // 因此先累积到换行，再按事件类型更新同一条助手消息。
+        const handleLine=line=>{
+          if(!line.trim())return;
+          const event=JSON.parse(line);
+          if(event.type==='error')throw new Error(event.error||'回答失败');
+          if(event.type==='update'||event.type==='done'){
+            // update 来自 Agent 的 onText；done 表示整轮 Agent 已结束。
+            setAssistantHTML(waiting,event.html||'');hasUpdate=true;
+            if(event.type==='done')done=true;
+          }
+        };
+        while(true){
+          const {value,done:streamEnded}=await reader.read();
+          if(streamEnded)break;
+          pending+=decoder.decode(value,{stream:true});
+          let newline;
+          while((newline=pending.indexOf('\n'))!==-1){handleLine(pending.slice(0,newline));pending=pending.slice(newline+1)}
+        }
+        pending+=decoder.decode();
+        if(pending.trim())handleLine(pending);
+        if(!done)throw new Error('回答连接提前中断');
+      }catch(err){
+        if(!hasUpdate)waiting.remove();
+        notice(err.message,true);
+      }finally{
+        endStream();
+        input.focus();
+      }
     }
     async function refreshSessions(selected=''){
       const res=await fetch('/api/sessions',{headers:{'X-Conversation-ID':conversationId}});
@@ -132,7 +235,7 @@
       sessions.hidden=false;
       activeSession=selected;
       sessions.value=selected;
-      setBusy(false);
+      resetRunState();
     }
     async function selectSession(sessionId){
       const res=await fetch('/api/sessions/select',{method:'POST',headers:{'Content-Type':'application/json','X-Conversation-ID':conversationId},body:JSON.stringify({session_id:sessionId})});
@@ -144,7 +247,7 @@
       const restored=await loadMessages();
       if(!restored)notice('新对话已创建');
       input.placeholder='向当前对话提问…';
-      setBusy(false);input.focus();
+      resetRunState();input.focus();
     }
     async function createSession(){
       const res=await fetch('/api/sessions',{method:'POST',headers:{'X-Conversation-ID':conversationId}});
@@ -179,7 +282,7 @@
       }
       remember(root);
       input.placeholder='先选择或新建对话…';
-      setBusy(false);input.focus();
+      resetRunState();input.focus();
     }
     async function openRecent(root){
       setBusy(true);
@@ -204,6 +307,9 @@
         await refreshSessions();
       }catch(err){notice(err.message,true)}finally{setBusy(false)}
     });
+    pauseRun.addEventListener('click',()=>control('pause','/api/chat/pause','暂停请求','paused'));
+    resumeRun.addEventListener('click',resumeTask);
+    cancelRun.addEventListener('click',()=>control('cancel','/api/chat/cancel','取消请求','idle'));
     pickProject.addEventListener('click',async()=>{
       setBusy(true);
       try{
@@ -217,41 +323,11 @@
     form.addEventListener('submit',async e=>{
       e.preventDefault();
       const message=input.value.trim();
-      if(!message||busy||!activeRoot)return;
-      input.value='';addUser(message);setBusy(true);
-      const waiting=addAssistant('<p>正在处理…</p>');
-      let hasUpdate=false;
-      try{
-        const res=await fetch('/api/chat/stream',{method:'POST',headers:{'Content-Type':'application/json','X-Conversation-ID':conversationId},body:JSON.stringify({message})});
-        if(!res.ok){const data=await res.json();throw new Error(data.error||'请求失败')}
-        if(!res.body)throw new Error('浏览器不支持流式读取');
-        const reader=res.body.getReader();
-        const decoder=new TextDecoder();
-        let pending='';let done=false;
-        // Go 每次 Flush 一行 JSON；网络读取可能把一行拆开或把多行合在一起。
-        // 因此先累积到换行，再按事件类型更新同一条助手消息。
-        const handleLine=line=>{
-          if(!line.trim())return;
-          const event=JSON.parse(line);
-          if(event.type==='error')throw new Error(event.error||'回答失败');
-          if(event.type==='update'||event.type==='done'){
-            // update 来自 Agent 的 onText；done 表示整轮 Agent 已结束。
-            setAssistantHTML(waiting,event.html||'');hasUpdate=true;
-            if(event.type==='done')done=true;
-          }
-        };
-        while(true){
-          const {value,done:streamEnded}=await reader.read();
-          if(streamEnded)break;
-          pending+=decoder.decode(value,{stream:true});
-          let newline;
-          while((newline=pending.indexOf('\n'))!==-1){handleLine(pending.slice(0,newline));pending=pending.slice(newline+1)}
-        }
-        pending+=decoder.decode();
-        if(pending.trim())handleLine(pending);
-        if(!done)throw new Error('回答连接提前中断');
-      }catch(err){if(!hasUpdate)waiting.remove();notice(err.message,true)}finally{setBusy(false);input.focus()}
+      if(!message||!activeRoot||!activeSession)return;
+      input.value='';setBusy(activeStreams>0);
+      streamMessage(message);
     });
+    input.addEventListener('input',()=>setBusy(activeStreams>0));
     input.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing){e.preventDefault();form.requestSubmit()}});
     showRecent();
     fetch('/api/project',{headers:{'X-Conversation-ID':conversationId}}).then(res=>res.json()).then(data=>{

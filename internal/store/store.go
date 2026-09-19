@@ -2,6 +2,7 @@ package store
 
 import (
 	"bufio"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -18,8 +19,10 @@ import (
 )
 
 const (
-	dirName     = ".wiki-agent"
-	sessionsDir = "sessions"
+	dirName        = ".wiki-agent"
+	sessionsDir    = "sessions"
+	statesDir      = "states"
+	checkpointsDir = "checkpoints"
 )
 
 type Store struct {
@@ -44,6 +47,39 @@ type Session struct {
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }
+
+type RunStatus string
+
+const (
+	RunStatusIdle     RunStatus = "idle"
+	RunStatusRunning  RunStatus = "running"
+	RunStatusPaused   RunStatus = "paused"
+	RunStatusCanceled RunStatus = "canceled"
+	RunStatusFailed   RunStatus = "failed"
+)
+
+type PauseStatus string
+
+const (
+	PauseStatusNone      PauseStatus = "none"
+	PauseStatusRequested PauseStatus = "requested"
+	PauseStatusPaused    PauseStatus = "paused"
+)
+
+type SessionState struct {
+	SessionID            string      `json:"session_id"`
+	NodeID               string      `json:"node_id"`
+	WikiRoot             string      `json:"wiki_root"`
+	ReceivedCount        int         `json:"received_count"`
+	AcceptedCount        int         `json:"accepted_count"`
+	IntentRevision       int         `json:"intent_revision"`
+	RunStatus            RunStatus   `json:"run_status"`
+	PauseStatus          PauseStatus `json:"pause_status"`
+	CurrentVisibleAnswer string      `json:"current_visible_answer,omitempty"`
+	UpdatedAt            time.Time   `json:"updated_at"`
+}
+
+type StateUpdate func(*SessionState)
 
 func New() *Store {
 	baseDir, err := os.Getwd()
@@ -98,12 +134,15 @@ func (s *Store) CreateSession(wikiRoot, sessionID string) error {
 	}
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if os.IsExist(err) {
-		return nil
+		return s.updateSessionStateLocked(wikiRoot, sessionID, func(state *SessionState) {})
 	}
 	if err != nil {
 		return err
 	}
-	return file.Close()
+	if err := file.Close(); err != nil {
+		return err
+	}
+	return s.updateSessionStateLocked(wikiRoot, sessionID, func(state *SessionState) {})
 }
 
 func (s *Store) AppendMessage(wikiRoot string, message Message) error {
@@ -142,7 +181,15 @@ func (s *Store) AppendMessage(wikiRoot string, message Message) error {
 	}
 	defer file.Close()
 	encoder := json.NewEncoder(file)
-	return encoder.Encode(message)
+	if err := encoder.Encode(message); err != nil {
+		return err
+	}
+	return s.updateSessionStateLocked(wikiRoot, message.SessionID, func(state *SessionState) {
+		state.ReceivedCount++
+		if message.Role == "user" {
+			state.IntentRevision++
+		}
+	})
 }
 
 func (s *Store) LoadMessages(wikiRoot, sessionID string) ([]Message, error) {
@@ -243,15 +290,184 @@ func (s *Store) DeleteSession(wikiRoot, sessionID string) error {
 	if !validID(sessionID, "s-") {
 		return fmt.Errorf("invalid session id")
 	}
-	err := os.Remove(s.SessionPath(wikiRoot, sessionID))
-	if os.IsNotExist(err) {
-		return nil
+	for _, path := range []string{s.SessionPath(wikiRoot, sessionID), s.StatePath(wikiRoot, sessionID), filepath.Join(s.baseDir, dirName, checkpointsDir, s.CheckPointID(wikiRoot, sessionID)+".bin")} {
+		err := os.Remove(path)
+		if err != nil && !os.IsNotExist(err) {
+			return err
+		}
 	}
-	return err
+	return nil
 }
 
 func (s *Store) SessionPath(wikiRoot, sessionID string) string {
 	return filepath.Join(s.baseDir, dirName, sessionsDir, NodeID(wikiRoot), sessionID+".jsonl")
+}
+
+func (s *Store) StatePath(wikiRoot, sessionID string) string {
+	return filepath.Join(s.baseDir, dirName, statesDir, NodeID(wikiRoot), sessionID+".json")
+}
+
+func (s *Store) Get(ctx context.Context, checkPointID string) ([]byte, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
+	path, err := s.checkPointPath(checkPointID)
+	if err != nil {
+		return nil, false, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return data, true, ctx.Err()
+}
+
+func (s *Store) Set(ctx context.Context, checkPointID string, checkPoint []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	path, err := s.checkPointPath(checkPointID)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, checkPoint, 0600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	// Rename succeeded: reporting cancellation here would claim the checkpoint
+	// failed even though a resumable checkpoint is already visible on disk.
+	return nil
+}
+
+func (s *Store) Delete(ctx context.Context, checkPointID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	path, err := s.checkPointPath(checkPointID)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	err = os.Remove(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Store) CheckPointID(wikiRoot, sessionID string) string {
+	return NodeID(wikiRoot) + "-" + sessionID
+}
+
+func (s *Store) checkPointPath(checkPointID string) (string, error) {
+	if !validID(checkPointID, "n-") {
+		return "", fmt.Errorf("invalid checkpoint id")
+	}
+	return filepath.Join(s.baseDir, dirName, checkpointsDir, checkPointID+".bin"), nil
+}
+
+func (s *Store) LoadSessionState(wikiRoot, sessionID string) (SessionState, error) {
+	if !validID(sessionID, "s-") {
+		return SessionState{}, fmt.Errorf("invalid session id")
+	}
+	path := s.StatePath(wikiRoot, sessionID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state, err := s.loadSessionStateLocked(wikiRoot, sessionID, path)
+	if err != nil {
+		return SessionState{}, err
+	}
+	return state, nil
+}
+
+func (s *Store) UpdateSessionState(wikiRoot, sessionID string, update StateUpdate) error {
+	if !validID(sessionID, "s-") {
+		return fmt.Errorf("invalid session id")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.updateSessionStateLocked(wikiRoot, sessionID, update)
+}
+
+func (s *Store) updateSessionStateLocked(wikiRoot, sessionID string, update StateUpdate) error {
+	path := s.StatePath(wikiRoot, sessionID)
+	state, err := s.loadSessionStateLocked(wikiRoot, sessionID, path)
+	if err != nil {
+		return err
+	}
+	if update != nil {
+		update(&state)
+	}
+	state.SessionID = sessionID
+	state.NodeID = NodeID(wikiRoot)
+	state.WikiRoot = strings.TrimSpace(wikiRoot)
+	state.UpdatedAt = time.Now().UTC()
+	if state.RunStatus == "" {
+		state.RunStatus = RunStatusIdle
+	}
+	if state.PauseStatus == "" {
+		state.PauseStatus = PauseStatusNone
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	file, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	encoder := json.NewEncoder(file)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(state); err != nil {
+		_ = file.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+func (s *Store) loadSessionStateLocked(wikiRoot, sessionID, path string) (SessionState, error) {
+	state := SessionState{
+		SessionID:   sessionID,
+		NodeID:      NodeID(wikiRoot),
+		WikiRoot:    strings.TrimSpace(wikiRoot),
+		RunStatus:   RunStatusIdle,
+		PauseStatus: PauseStatusNone,
+	}
+	file, err := os.Open(path)
+	if os.IsNotExist(err) {
+		return state, nil
+	}
+	if err != nil {
+		return SessionState{}, err
+	}
+	defer file.Close()
+	if err := json.NewDecoder(file).Decode(&state); err != nil {
+		return SessionState{}, err
+	}
+	return state, nil
 }
 
 func validID(id, prefix string) bool {

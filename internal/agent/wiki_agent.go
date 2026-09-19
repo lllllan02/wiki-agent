@@ -12,6 +12,7 @@ import (
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
+	"github.com/lllllan02/wiki-agent/internal/agent/plugins/checkpoint"
 	"github.com/lllllan02/wiki-agent/internal/config"
 	"github.com/lllllan02/wiki-agent/internal/runcontext"
 	toolmiddleware "github.com/lllllan02/wiki-agent/internal/tool/middleware"
@@ -21,6 +22,8 @@ import (
 type Result struct {
 	Answer string
 }
+
+type CancelRegistrar = checkpoint.CancelRegistrar
 
 var wikiReadToolNames = []string{
 	"filesystem__list_directory",
@@ -75,7 +78,7 @@ func NewWikiAgent(ctx context.Context, cfg config.Config) (*WikiAgent, error) {
 		toolmiddleware.Timeout(cfg.MCP.Timeout),
 	}
 	// 注册必须先于 NewChatModelAgent：EINO 的 ReAct 图会根据模型返回的
-	// ToolCalls 选择并执行这些工具；下面的 Stream/consumeMessage 不负责调度工具。
+	// ToolCalls 选择并执行这些工具；WikiAgent 只负责组装业务输入。
 	toolregistry.RegisterTools(agentConfig, toolset.Tools, middlewares...)
 	agent, err := adk.NewChatModelAgent(ctx, agentConfig)
 	if err != nil {
@@ -84,28 +87,43 @@ func NewWikiAgent(ctx context.Context, cfg config.Config) (*WikiAgent, error) {
 	return &WikiAgent{agent: agent, maxElapsed: cfg.Agent.MaxElapsed}, nil
 }
 
-// Stream 从 EINO Runner 读取整轮 Agent 事件。onText 是调用方传进来的 Go 回调，
-// 不是 EINO API：每收到一段助手正文，就以「当前这条助手消息的完整正文」调用它。
-// Web 层传入的实现会把正文转成 Markdown HTML，写入 HTTP 响应并 Flush 给浏览器。
-// 工具调用的判断和执行发生在 EINO 的 ReAct 图中，见 docs/streaming.md。
+// Stream 执行一轮 Wiki 请求；消息组装、事件流和单条消息处理都在 WikiAgent 中。
 func (a *WikiAgent) Stream(ctx context.Context, request string, onText func(string) error) (*Result, error) {
-	if strings.TrimSpace(request) == "" {
+	return a.stream(ctx, request, nil, onText)
+}
+
+func (a *WikiAgent) StreamWithCheckPoint(ctx context.Context, request, checkPointID string, checkPointStore adk.CheckPointStore, onText func(string) error, onCancelReady CancelRegistrar) (*Result, error) {
+	plugin := &checkpoint.Plugin{ID: checkPointID, Store: checkPointStore, OnCancelReady: onCancelReady}
+	return a.stream(ctx, request, plugin, onText)
+}
+
+func (a *WikiAgent) ResumeWithCheckPoint(ctx context.Context, checkPointID string, checkPointStore adk.CheckPointStore, onText func(string) error, onCancelReady CancelRegistrar) (*Result, error) {
+	plugin := &checkpoint.Plugin{ID: checkPointID, Store: checkPointStore, Resume: true, OnCancelReady: onCancelReady}
+	return a.stream(ctx, "", plugin, onText)
+}
+
+func (a *WikiAgent) stream(ctx context.Context, request string, plugin *checkpoint.Plugin, onText func(string) error) (*Result, error) {
+	if (plugin == nil || !plugin.Resume) && strings.TrimSpace(request) == "" {
 		return nil, fmt.Errorf("用户请求不能为空")
 	}
 	ctx = runcontext.WithRunID(ctx)
 	ctx, cancel := context.WithTimeout(ctx, a.maxElapsed)
 	defer cancel()
-	runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: a.agent, EnableStreaming: true})
-	// Run 启动 EINO 的「模型 → 如需工具则执行工具 → 再次调用模型」循环。
-	// Next 取的是 Agent 事件；一个事件里还可能有需要逐段 Recv 的 MessageStream。
-	// 路径不再由注册层改写；将本轮目录作为上下文交给模型，不写入共享 Agent。
-	metadata := runcontext.From(ctx)
-	messages := []*schema.Message{
-		schema.SystemMessage(fmt.Sprintf("本轮 Wiki 根目录：%q", metadata.WikiRoot)),
+
+	config := adk.RunnerConfig{Agent: a.agent, EnableStreaming: true}
+	plugin.Register(&config)
+	runner := adk.NewRunner(ctx, config)
+	var messages []*schema.Message
+	if plugin == nil || !plugin.Resume {
+		metadata := runcontext.From(ctx)
+		messages = []*schema.Message{schema.SystemMessage(fmt.Sprintf("本轮 Wiki 根目录：%q", metadata.WikiRoot))}
+		messages = append(messages, metadata.History...)
+		messages = append(messages, schema.UserMessage(request))
 	}
-	messages = append(messages, metadata.History...)
-	messages = append(messages, schema.UserMessage(request))
-	iter := runner.Run(ctx, messages)
+	iter, err := plugin.Start(ctx, runner, messages)
+	if err != nil {
+		return nil, err
+	}
 	var answer string
 	for {
 		if err := ctx.Err(); err != nil {
@@ -128,8 +146,6 @@ func (a *WikiAgent) Stream(ctx context.Context, request string, onText func(stri
 		if err != nil {
 			return nil, err
 		}
-		// 新一轮模型输出会成为最新回答；工具调用前可能出现的临时文字不会
-		// 与工具调用后的最终回答拼接。Web 每次也会替换同一个回答区域。
 		if strings.TrimSpace(current) != "" {
 			answer = current
 		}
@@ -143,14 +159,12 @@ func (a *WikiAgent) Stream(ctx context.Context, request string, onText func(stri
 	return &Result{Answer: answer}, nil
 }
 
-// 一个 EINO 消息事件既可能是完整消息，也可能带有需要主动读取并关闭的消息流。
-// ToolCalls 是助手消息上的结构化字段，由 EINO 内部检查；这里只发布 Content。
+// consumeMessage 只向页面发布助手正文；工具消息仍要完整读取。
 func consumeMessage(ctx context.Context, output *adk.MessageVariant, onText func(string) error) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
 	if output.Role != schema.Assistant {
-		// 工具结果可能是流；读完它，但不把工具原始输出显示为助手回答。
 		_, err := output.GetMessage()
 		if err != nil {
 			return "", err
@@ -176,7 +190,6 @@ func consumeMessage(ctx context.Context, output *adk.MessageVariant, onText func
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
-		// Recv 的 EOF 只表示这条消息结束；外层 Next 才表示整轮 Agent 结束。
 		chunk, err := output.MessageStream.Recv()
 		if errors.Is(err, io.EOF) {
 			return content.String(), nil
@@ -188,11 +201,9 @@ func consumeMessage(ctx context.Context, output *adk.MessageVariant, onText func
 			return "", err
 		}
 		if chunk == nil || chunk.Content == "" {
-			// 例如工具调用参数可能在 ToolCalls 中，Content 为空时无需推给页面。
 			continue
 		}
 		content.WriteString(chunk.Content)
-		// 这是同步回调：Web 写出这一版内容后，才继续读取下一段模型输出。
 		if err := onText(content.String()); err != nil {
 			return "", err
 		}

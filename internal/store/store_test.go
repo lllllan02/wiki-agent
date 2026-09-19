@@ -41,6 +41,13 @@ func TestAppendAndLoadMessages(t *testing.T) {
 	if len(history) != 2 || history[0].Role != schema.User || history[0].Content != "hello" || history[1].Role != schema.Assistant || history[1].Content != "world" {
 		t.Fatalf("agent history: %+v", history)
 	}
+	state, err := store.LoadSessionState(root, sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.ReceivedCount != 2 || state.IntentRevision != 1 || state.RunStatus != RunStatusIdle || state.PauseStatus != PauseStatusNone {
+		t.Fatalf("state not updated from messages: %+v", state)
+	}
 }
 
 func TestAppendRejectsInvalidSessionID(t *testing.T) {
