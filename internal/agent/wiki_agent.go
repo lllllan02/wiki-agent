@@ -13,11 +13,21 @@ import (
 	"github.com/cloudwego/eino/schema"
 	"github.com/lllllan02/wiki-agent/internal/config"
 	"github.com/lllllan02/wiki-agent/internal/runcontext"
+	toolmiddleware "github.com/lllllan02/wiki-agent/internal/tool/middleware"
 	toolregistry "github.com/lllllan02/wiki-agent/internal/tool/registry"
 )
 
 type Result struct {
 	Answer string
+}
+
+var wikiReadToolNames = []string{
+	"filesystem__list_directory",
+	"filesystem__search_files",
+	"filesystem__read_text_file",
+	"filesystem__get_file_info",
+	"ripgrep__search",
+	"files__read_file",
 }
 
 // WikiAgent 只持有可复用的 EINO Agent；目录和会话标识由 context 传入。
@@ -51,13 +61,20 @@ func NewWikiAgent(ctx context.Context, cfg config.Config) (*WikiAgent, error) {
 	if err != nil {
 		return nil, err
 	}
-	tools, err := manager.Tools()
+	toolset, err := manager.SelectAvailable(wikiReadToolNames)
 	if err != nil {
 		return nil, err
 	}
+	schemaValidation := toolmiddleware.SchemaValidation(toolset.Tools)
+	middlewares := []compose.ToolMiddleware{
+		toolmiddleware.ContractMiddleware(),
+		schemaValidation,
+		toolmiddleware.PathPolicy(toolset.Policies),
+		toolmiddleware.Timeout(cfg.MCP.Timeout),
+	}
 	// 注册必须先于 NewChatModelAgent：EINO 的 ReAct 图会根据模型返回的
 	// ToolCalls 选择并执行这些工具；下面的 Stream/consumeMessage 不负责调度工具。
-	toolregistry.RegisterTools(agentConfig, tools)
+	toolregistry.RegisterTools(agentConfig, toolset.Tools, middlewares...)
 	agent, err := adk.NewChatModelAgent(ctx, agentConfig)
 	if err != nil {
 		return nil, err

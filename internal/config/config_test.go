@@ -73,12 +73,12 @@ func TestLoadFilesAndErrors(t *testing.T) {
 }
 
 func TestMCPRegistryPath(t *testing.T) {
-	path := yamlFile(t, "mcp:\n  registry_file: mcp.local.yaml\n  timeout: 9s\n  max_bytes: 2048\n")
+	path := yamlFile(t, "mcp:\n  registry_file: mcp.local.yaml\n  timeout: 9s\n")
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.MCP.RegistryFile != filepath.Join(filepath.Dir(path), "mcp.local.yaml") || cfg.MCP.Timeout != 9*time.Second || cfg.MCP.MaxBytes != 2048 {
+	if cfg.MCP.RegistryFile != filepath.Join(filepath.Dir(path), "mcp.local.yaml") || cfg.MCP.Timeout != 9*time.Second {
 		t.Fatalf("MCP 配置未正确解析: %+v", cfg.MCP)
 	}
 }

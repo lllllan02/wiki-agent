@@ -16,7 +16,7 @@ WikiAgent 在构造时创建模型、从工具模块获取应用内共享的 MCP
 
 ## 当前工具结构
 
-`internal/tool/mcp` 从 `mcp.yaml` 连接现成服务并应用白名单；`internal/tool/registry` 将已发现的 MCP 工具直接注册到 EINO；名称检查、分发和实际调用由框架负责，前后操作通过原生 ToolMiddleware 接入，默认不安装检查或结果包装。文件列表、文件名搜索、正文搜索和读取由 Filesystem 与 ripgrep MCP 实现。没有另写同功能的 Wiki Tool。
+`internal/tool/mcp` 从 `mcp.yaml` 连接现成服务并应用白名单；`internal/tool/registry` 将已发现的 MCP 工具直接注册到 EINO；`internal/tool/middleware` 按独立文件实现参数校验、Wiki 路径策略、单次调用超时、异常归类和结果契约。名称检查、分发和实际调用由框架负责。文件列表、文件名搜索、正文搜索和读取由 Filesystem 与 ripgrep MCP 实现。没有另写同功能的 Wiki Tool。
 
 `cmd` 负责入口，`internal/app` 创建 Agent 和 HTTP 服务，`internal/web` 维护网页会话。每个 Agent 在构造时接入工具，仅保存 EINO Agent，运行接口为 `Stream(ctx, request, onText)`，运行时创建 Runner。页面打开目录时由 Web 层检查目录存在性。首个 Agent 构造时建立 MCP 连接，后续 Agent 复用；工具组件随应用生命周期 context 关闭，MCP 初始化失败时立即清理。EINO ADK 负责模型调用、工具调用标识及结果回填。
 

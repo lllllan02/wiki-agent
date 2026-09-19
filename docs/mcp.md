@@ -27,7 +27,6 @@ python3 -m venv .cache/mcp-python
 mcp:
   registry_file: mcp.yaml
   timeout: 30s
-  max_bytes: 32768
 ```
 
 默认配置在创建 Agent 时连接并发现共享 MCP，此后所有窗口、目录和 Agent 复用工具对象与连接。所有服务统一共享，不按目录启动。`registry_file` 必须指定；留空会明确报错。已有用户配置不会被程序自动覆盖。
@@ -63,15 +62,15 @@ mcp:
 
 WikiAgent 构造时调用 `LoadMCP(appCtx, cfg.MCP)` 获取共享工具管理器。工具模块以应用生命周期（context 的 Done 通道）和 MCP 配置为共享键；首次调用连接服务、握手并发现工具，后续 Agent 获取同一个 Manager 和相同工具对象。并发构造也只初始化一次。
 
-Agent 构造时调用 `manager.Tools()`，再用 `registry.RegisterTools(agentConfig, tools)` 注册。`Stream` 只创建流式 Runner，不获取或释放连接。目录来自运行 context，在实际调用前检查；打开或切换目录不会改变 MCP 连接。
+Agent 构造时调用 `manager.Select(...)` 或 `manager.SelectAvailable(...)` 明确选择自己的工具集，再按该 Agent 的职责组装中间件，并通过 `registry.RegisterTools(agentConfig, toolset.Tools, middlewares...)` 注册。`Stream` 只创建流式 Runner，不获取或释放连接。目录来自运行 context，在实际调用前检查；打开或切换目录不会改变 MCP 连接。
 
 应用生命周期 context 取消后，工具模块移除共享实例并关闭整组连接。单轮调用取消不会关闭共享连接。初始化失败会清理已建立的连接且不缓存失败结果，后续可以重试。单个 Agent 不得关闭共享 Manager；新应用生命周期会重新建立连接。配置或工具 schema 变更需重启应用。
 
 EINO v0.9.19 直接静态注册工具后，同一 Agent 并发 Run 会竞争内部 ReAct 的 `cancelCtx`。`RegisterTools` 将同一组标准工具注册到固定 handler 中，使 SDK 为每轮构建独立执行配置；handler 不执行工具发现、连接打开或目录包装。这是 SDK 适配，不要求各 Agent 实现自己的工具生命周期。
 
-当前工具注册链路采用 EINO 原生工具接口与中间件，详见 [Tool Registry](tool-registry.md)。Filesystem MCP 以 `/` 作为启动根目录以复用进程；当前应用层不再执行 Wiki 路径限制。调用方传递绝对路径，访问能力由 MCP 服务配置决定。
+当前工具注册链路采用 EINO 原生工具接口与中间件，详见 [Tool Registry](tool-registry.md)。Filesystem MCP 以 `/` 作为启动根目录以复用进程；调用方可以传当前 Wiki 内相对路径，治理中间件会在调用前改写为绝对路径并拒绝越界访问。
 
-工具结果由官方适配器原样交给 EINO；当前没有额外参数校验、逐次调用超时、Markdown 限制、输出截断或 `status/data/continuation` 包装。`path_parameters` 与 `mcp.max_bytes` 保留兼容，等待后续中间件接入。Files MCP 的分页直接使用上游 `offset` / `limit` 参数和返回结果。
+工具结果会被治理中间件包装成 `status/result/error` 契约；工具调用和工具结果的对应关系仍由 EINO ToolCall ID 负责。参数 schema 校验、逐次调用超时和 Markdown 路径限制都在进入实际工具前完成。Files MCP 的分页直接使用上游 `offset` / `limit` 参数，结果长度管理留给后续上下文管理或结果优化组件。
 
 ## 验证
 
@@ -108,13 +107,21 @@ WIKI_AGENT_MCP_INTEGRATION=1 go test ./internal/tool/mcp -run TestInstalledServe
 // 相同配置返回同一 Manager，不要传单轮请求 context。
 manager, err := registry.LoadMCP(appCtx, cfg.MCP)
 if err != nil { return err }
-tools, err := manager.Tools()
+// 多 Agent 阶段不要默认注册全部工具；这里按角色显式选择。
+toolset, err := manager.SelectAvailable([]string{"ripgrep__search", "files__read_file"})
 if err != nil { return err }
-registry.RegisterTools(agentConfig, tools)
+schemaValidation := middleware.SchemaValidation(toolset.Tools)
+middlewares := []compose.ToolMiddleware{
+    middleware.ContractMiddleware(),
+    schemaValidation,
+    middleware.PathPolicy(toolset.Policies),
+    middleware.Timeout(cfg.MCP.Timeout),
+}
+registry.RegisterTools(agentConfig, toolset.Tools, middlewares...)
 // 创建 Agent 后，运行时只需携带调用上下文：
 runCtx := runcontext.With(ctx, runcontext.Metadata{SessionID: sessionID, WikiRoot: wikiRoot})
 runner := adk.NewRunner(runCtx, adk.RunnerConfig{Agent: myAgent})
 iter := runner.Run(runCtx, messages)
 ```
 
-`manager.Tools()` 返回标准 `[]tool.BaseTool`，可筛选或与普通 Go 工具一起注册。无路径参数的共享工具不要求 Wiki 上下文。子 Agent 继承上下文即可，不需要在自己的 Run 中增加 Open/Release。
+`manager.Select(...)` 返回标准 `[]tool.BaseTool` 和这组工具对应的策略，并要求清单中的工具全部启用；`manager.SelectAvailable(...)` 会从允许清单里取当前配置实际启用的子集。无路径参数的共享工具不要求 Wiki 上下文。子 Agent 继承上下文即可，不需要在自己的 Run 中增加 Open/Release。`manager.Tools()` 仍可用于调试或测试，但业务 Agent 不应默认注册全量工具。

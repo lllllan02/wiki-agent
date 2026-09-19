@@ -39,11 +39,11 @@ func TestSharedConnectionsLifecycle(t *testing.T) {
 	}))
 	defer httpServer.Close()
 	registryFile := filepath.Join(t.TempDir(), "mcp.yaml")
-	body := fmt.Sprintf("servers:\n  - name: fixture\n    enabled: true\n    transport: streamable_http\n    url: %q\n    tools: [ping]\n", httpServer.URL+"/mcp")
+	body := fmt.Sprintf("servers:\n  - name: fixture\n    enabled: true\n    transport: streamable_http\n    url: %q\n    tools: [ping]\n    path_parameters: [path]\n", httpServer.URL+"/mcp")
 	if err := os.WriteFile(registryFile, []byte(body), 0600); err != nil {
 		t.Fatal(err)
 	}
-	cfg := config.MCP{RegistryFile: registryFile, Timeout: 5 * time.Second, MaxBytes: 1024}
+	cfg := config.MCP{RegistryFile: registryFile, Timeout: 5 * time.Second}
 	lifetime, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	managers := make(chan *Manager, 8)
@@ -88,6 +88,17 @@ func TestSharedConnectionsLifecycle(t *testing.T) {
 	if result, err := ping.InvokableRun(context.Background(), `{}`); err != nil || !strings.Contains(result, "pong") {
 		t.Fatalf("单次取消影响了共享连接: %s %v", result, err)
 	}
+	selected, err := first.Select([]string{"fixture__ping"})
+	if err != nil || len(selected.Tools) != 1 || len(selected.Policies["fixture__ping"].PathParameters) != 1 {
+		t.Fatalf("工具集选择失败: %+v %v", selected, err)
+	}
+	if _, err := first.Select([]string{"fixture__missing"}); err == nil {
+		t.Fatal("未知工具不应被授予给 Agent")
+	}
+	available, err := first.SelectAvailable([]string{"fixture__missing", "fixture__ping"})
+	if err != nil || len(available.Tools) != 1 {
+		t.Fatalf("可选工具选择失败: %+v %v", available, err)
+	}
 	cancel()
 	select {
 	case <-first.closed:
@@ -127,7 +138,7 @@ func TestFailedInitializationCanRetry(t *testing.T) {
 	}
 	lifetime, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	cfg := config.MCP{RegistryFile: path, Timeout: 5 * time.Second, MaxBytes: 1024}
+	cfg := config.MCP{RegistryFile: path, Timeout: 5 * time.Second}
 	if _, err := LoadMCP(lifetime, cfg); err == nil {
 		t.Fatal("缺失工具应阻止初始化")
 	}

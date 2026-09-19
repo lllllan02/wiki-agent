@@ -20,7 +20,6 @@ server:
 mcp:
   registry_file: mcp.yaml
   timeout: 30s
-  max_bytes: 32768
 ```
 
 字段说明：
@@ -46,6 +45,6 @@ go run ./cmd/wiki-agent
 
 ## MCP 配置
 
-`mcp.registry_file` 必填，留空会在启动时提示配置；`mcp.timeout` 默认 `30s`，`mcp.max_bytes` 默认 `32768`。`registry_file` 相对路径以 `config.yaml` 所在目录为基准。指定 `mcp.yaml` 后使用注册表中的已启用服务，现成服务器需要先安装。
+`mcp.registry_file` 必填，留空会在启动时提示配置；`mcp.timeout` 默认 `30s`。`registry_file` 相对路径以 `config.yaml` 所在目录为基准。指定 `mcp.yaml` 后使用注册表中的已启用服务，现成服务器需要先安装。
 
 服务启停、命令、地址和工具白名单在注册表中配置；敏感认证头写到被忽略的 `mcp.local.yaml`，并让 `registry_file` 指向该文件。产品配置仍只来自 YAML，不自动读取环境变量覆盖。详见 [MCP 接入说明](mcp.md)。

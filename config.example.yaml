@@ -15,4 +15,3 @@ server:
 mcp:
   registry_file: mcp.yaml    # 必填；服务器注册表。先执行 npm ci --prefix mcp。
   timeout: 30s               # 每次 MCP 握手、发现、调用的超时。
-  max_bytes: 32768           # 工具结果超出后明确标注截断。

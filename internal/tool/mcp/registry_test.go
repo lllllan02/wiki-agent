@@ -18,7 +18,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 )
 
-func testConfig() config.MCP { return config.MCP{Timeout: 5 * time.Second, MaxBytes: 1024} }
+func testConfig() config.MCP { return config.MCP{Timeout: 5 * time.Second} }
 
 func findTool(t *testing.T, s *ConnectionSet, name string) tool.InvokableTool {
 	t.Helper()

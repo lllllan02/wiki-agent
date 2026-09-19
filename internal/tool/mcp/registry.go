@@ -125,9 +125,15 @@ func Load(path string) (*Registry, error) {
 
 // ConnectionSet 由 Tool Manager 在服务生命周期内复用；关闭时取消并释放传输。
 type ConnectionSet struct {
-	Tools   []tool.BaseTool
-	clients []*client.Client
-	cancel  context.CancelFunc
+	Tools    []tool.BaseTool
+	Policies map[string]ToolPolicy
+	clients  []*client.Client
+	cancel   context.CancelFunc
+}
+
+// ToolPolicy 保存来自 MCP 注册表的业务约束；工具调用治理层会在实际调用前消费它。
+type ToolPolicy struct {
+	PathParameters []string
 }
 
 func (s *ConnectionSet) Close() {
@@ -143,7 +149,7 @@ func (s *ConnectionSet) Close() {
 // Open 使用 MCP Go 客户端与 EINO GetTools，仅负责连接、白名单和工具命名。
 func (r *Registry) Open(ctx context.Context, cfg config.MCP) (_ *ConnectionSet, err error) {
 	runCtx, cancel := context.WithCancel(ctx)
-	connections := &ConnectionSet{cancel: cancel}
+	connections := &ConnectionSet{cancel: cancel, Policies: map[string]ToolPolicy{}}
 	defer func() {
 		if err != nil {
 			connections.Close()
@@ -153,8 +159,8 @@ func (r *Registry) Open(ctx context.Context, cfg config.MCP) (_ *ConnectionSet, 
 		if !server.Enabled {
 			continue
 		}
-		if cfg.Timeout <= 0 || cfg.MaxBytes <= 0 {
-			return nil, fmt.Errorf("MCP 超时和输出上限必须大于 0")
+		if cfg.Timeout <= 0 {
+			return nil, fmt.Errorf("MCP 超时必须大于 0")
 		}
 		expand := strings.NewReplacer("${PROJECT_ROOT}", r.baseDir).Replace
 		var cli *client.Client
@@ -223,7 +229,9 @@ func (r *Registry) Open(ctx context.Context, cfg config.MCP) (_ *ConnectionSet, 
 			if len(server.PathParameters) > 0 {
 				copyInfo.Desc += " 路径可以使用当前 Wiki 内的相对路径；根目录用 .，禁止访问 Wiki 外部。"
 			}
+			prefixedName := copyInfo.Name
 			connections.Tools = append(connections.Tools, &namedTool{upstream: invokable, info: &copyInfo})
+			connections.Policies[prefixedName] = ToolPolicy{PathParameters: append([]string(nil), server.PathParameters...)}
 		}
 		for _, name := range server.Tools {
 			if !found[name] {
