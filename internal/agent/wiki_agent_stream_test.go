@@ -9,11 +9,15 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/schema"
+	"github.com/lllllan02/wiki-agent/internal/runcontext"
 )
+
+const testMaxElapsed = time.Minute
 
 func TestStreamFromOpenAICompatibleModel(t *testing.T) {
 	modelServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -43,7 +47,7 @@ func TestStreamFromOpenAICompatibleModel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a := &WikiAgent{agent: shared}
+	a := &WikiAgent{agent: shared, maxElapsed: testMaxElapsed}
 	var updates []string
 	result, err := a.Stream(ctx, "你好", func(text string) error {
 		updates = append(updates, text)
@@ -82,7 +86,7 @@ func (streamFixtureAgent) Run(_ context.Context, input *adk.AgentInput, _ ...adk
 }
 
 func TestStreamReplacesEarlierAssistantTurn(t *testing.T) {
-	a := &WikiAgent{agent: streamFixtureAgent{}}
+	a := &WikiAgent{agent: streamFixtureAgent{}, maxElapsed: testMaxElapsed}
 	var updates []string
 	result, err := a.Stream(context.Background(), "问题", func(text string) error {
 		updates = append(updates, text)
@@ -98,10 +102,80 @@ func TestStreamReplacesEarlierAssistantTurn(t *testing.T) {
 }
 
 func TestStreamStopsWhenConsumerFails(t *testing.T) {
-	a := &WikiAgent{agent: streamFixtureAgent{}}
+	a := &WikiAgent{agent: streamFixtureAgent{}, maxElapsed: testMaxElapsed}
 	want := errors.New("client disconnected")
 	_, err := a.Stream(context.Background(), "问题", func(string) error { return want })
 	if !errors.Is(err, want) {
 		t.Fatalf("stream error = %v, want %v", err, want)
+	}
+}
+
+type runContextFixtureAgent struct {
+	metadata runcontext.Metadata
+}
+
+func (a *runContextFixtureAgent) Name(context.Context) string        { return "fixture" }
+func (a *runContextFixtureAgent) Description(context.Context) string { return "fixture" }
+func (a *runContextFixtureAgent) Run(ctx context.Context, _ *adk.AgentInput, _ ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
+	a.metadata = runcontext.From(ctx)
+	iter, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
+	go func() {
+		defer generator.Close()
+		generator.Send(&adk.AgentEvent{Output: &adk.AgentOutput{MessageOutput: &adk.MessageVariant{
+			Role:    schema.Assistant,
+			Message: schema.AssistantMessage("ok", nil),
+		}}})
+	}()
+	return iter
+}
+
+func TestStreamAddsRunIDToContext(t *testing.T) {
+	fixture := &runContextFixtureAgent{}
+	a := &WikiAgent{agent: fixture, maxElapsed: testMaxElapsed}
+	ctx := runcontext.With(context.Background(), runcontext.Metadata{SessionID: "session-a", WikiRoot: "/tmp/wiki"})
+	result, err := a.Stream(ctx, "问题", func(string) error { return nil })
+	if err != nil || result.Answer != "ok" {
+		t.Fatalf("stream result=%+v err=%v", result, err)
+	}
+	if fixture.metadata.SessionID != "session-a" || fixture.metadata.WikiRoot != "/tmp/wiki" || fixture.metadata.RunID == "" {
+		t.Fatalf("metadata not propagated with run id: %+v", fixture.metadata)
+	}
+}
+
+type timeoutFixtureAgent struct{}
+
+func (timeoutFixtureAgent) Name(context.Context) string        { return "fixture" }
+func (timeoutFixtureAgent) Description(context.Context) string { return "fixture" }
+func (timeoutFixtureAgent) Run(ctx context.Context, _ *adk.AgentInput, _ ...adk.AgentRunOption) *adk.AsyncIterator[*adk.AgentEvent] {
+	iter, generator := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
+	go func() {
+		defer generator.Close()
+		<-ctx.Done()
+		generator.Send(&adk.AgentEvent{Err: ctx.Err()})
+	}()
+	return iter
+}
+
+func TestStreamMarksElapsedLimit(t *testing.T) {
+	a := &WikiAgent{agent: timeoutFixtureAgent{}, maxElapsed: time.Millisecond}
+	_, err := a.Stream(context.Background(), "问题", func(string) error { return nil })
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("timeout error = %v, want context deadline exceeded", err)
+	}
+}
+
+func TestConsumeMessageStopsWhenContextCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	called := false
+	_, err := consumeMessage(ctx, &adk.MessageVariant{
+		Role:    schema.Assistant,
+		Message: schema.AssistantMessage("late answer", nil),
+	}, func(string) error {
+		called = true
+		return nil
+	})
+	if !errors.Is(err, context.Canceled) || called {
+		t.Fatalf("consume after cancel: err=%v called=%v", err, called)
 	}
 }

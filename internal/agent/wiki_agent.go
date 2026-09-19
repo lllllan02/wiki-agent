@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/adk"
@@ -32,7 +33,8 @@ var wikiReadToolNames = []string{
 
 // WikiAgent 只持有可复用的 EINO Agent；目录和会话标识由 context 传入。
 type WikiAgent struct {
-	agent adk.Agent
+	agent      adk.Agent
+	maxElapsed time.Duration
 }
 
 func NewWikiAgent(ctx context.Context, cfg config.Config) (*WikiAgent, error) {
@@ -79,7 +81,7 @@ func NewWikiAgent(ctx context.Context, cfg config.Config) (*WikiAgent, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &WikiAgent{agent: agent}, nil
+	return &WikiAgent{agent: agent, maxElapsed: cfg.Agent.MaxElapsed}, nil
 }
 
 // Stream 从 EINO Runner 读取整轮 Agent 事件。onText 是调用方传进来的 Go 回调，
@@ -90,6 +92,9 @@ func (a *WikiAgent) Stream(ctx context.Context, request string, onText func(stri
 	if strings.TrimSpace(request) == "" {
 		return nil, fmt.Errorf("用户请求不能为空")
 	}
+	ctx = runcontext.WithRunID(ctx)
+	ctx, cancel := context.WithTimeout(ctx, a.maxElapsed)
+	defer cancel()
 	runner := adk.NewRunner(ctx, adk.RunnerConfig{Agent: a.agent, EnableStreaming: true})
 	// Run 启动 EINO 的「模型 → 如需工具则执行工具 → 再次调用模型」循环。
 	// Next 取的是 Agent 事件；一个事件里还可能有需要逐段 Recv 的 MessageStream。
@@ -101,9 +106,15 @@ func (a *WikiAgent) Stream(ctx context.Context, request string, onText func(stri
 	iter := runner.Run(ctx, messages)
 	var answer string
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		event, ok := iter.Next()
 		if !ok {
 			break
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
 		if event.Err != nil {
 			return nil, event.Err
@@ -111,7 +122,7 @@ func (a *WikiAgent) Stream(ctx context.Context, request string, onText func(stri
 		if event.Output == nil || event.Output.MessageOutput == nil {
 			continue
 		}
-		current, err := consumeMessage(event.Output.MessageOutput, onText)
+		current, err := consumeMessage(ctx, event.Output.MessageOutput, onText)
 		if err != nil {
 			return nil, err
 		}
@@ -121,6 +132,9 @@ func (a *WikiAgent) Stream(ctx context.Context, request string, onText func(stri
 			answer = current
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if strings.TrimSpace(answer) == "" {
 		return nil, fmt.Errorf("model returned an empty final answer")
 	}
@@ -129,15 +143,24 @@ func (a *WikiAgent) Stream(ctx context.Context, request string, onText func(stri
 
 // 一个 EINO 消息事件既可能是完整消息，也可能带有需要主动读取并关闭的消息流。
 // ToolCalls 是助手消息上的结构化字段，由 EINO 内部检查；这里只发布 Content。
-func consumeMessage(output *adk.MessageVariant, onText func(string) error) (string, error) {
+func consumeMessage(ctx context.Context, output *adk.MessageVariant, onText func(string) error) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if output.Role != schema.Assistant {
 		// 工具结果可能是流；读完它，但不把工具原始输出显示为助手回答。
 		_, err := output.GetMessage()
-		return "", err
+		if err != nil {
+			return "", err
+		}
+		return "", ctx.Err()
 	}
 	if !output.IsStreaming {
 		message, err := output.GetMessage()
 		if err != nil || message == nil || message.Content == "" {
+			return "", err
+		}
+		if err := ctx.Err(); err != nil {
 			return "", err
 		}
 		return message.Content, onText(message.Content)
@@ -148,12 +171,18 @@ func consumeMessage(output *adk.MessageVariant, onText func(string) error) (stri
 	defer output.MessageStream.Close()
 	var content strings.Builder
 	for {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		// Recv 的 EOF 只表示这条消息结束；外层 Next 才表示整轮 Agent 结束。
 		chunk, err := output.MessageStream.Recv()
 		if errors.Is(err, io.EOF) {
 			return content.String(), nil
 		}
 		if err != nil {
+			return "", err
+		}
+		if err := ctx.Err(); err != nil {
 			return "", err
 		}
 		if chunk == nil || chunk.Content == "" {

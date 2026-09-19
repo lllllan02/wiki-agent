@@ -37,7 +37,8 @@ type Model struct {
 
 // Agent 的步数计数单位是模型请求次数，而不是工具调用数量。
 type Agent struct {
-	MaxSteps int `mapstructure:"max_steps" default:"8"`
+	MaxSteps   int           `mapstructure:"max_steps" default:"8"`
+	MaxElapsed time.Duration `mapstructure:"max_elapsed" default:"2m"`
 }
 
 // Server 默认只监听本机，避免教学项目未经配置就暴露到局域网。
@@ -97,6 +98,8 @@ func (c Config) Validate() error {
 		return fmt.Errorf("请配置 mcp.registry_file；当前工具由 MCP 注册表提供")
 	case c.Agent.MaxSteps <= 0:
 		return fmt.Errorf("agent.max_steps 必须大于 0")
+	case c.Agent.MaxElapsed <= 0:
+		return fmt.Errorf("agent.max_elapsed 必须大于 0")
 	case strings.TrimSpace(c.Server.Address) == "":
 		return fmt.Errorf("server.address 不能为空")
 	case c.MCP.Timeout <= 0:

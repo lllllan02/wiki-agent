@@ -13,6 +13,7 @@ model:
 
 agent:
   max_steps: 8
+  max_elapsed: 2m
 
 server:
   address: "127.0.0.1:8080"
@@ -31,6 +32,7 @@ mcp:
 | `model.base_url` | 空 | 完整的 OpenAI 兼容 API 地址；DeepSeek 示例为 `https://api.deepseek.com/v1`，程序不自动补充 `/v1` |
 | `model.timeout` | `60s` | 单次模型请求超时 |
 | `agent.max_steps` | `8` | 一轮问题最多调用模型的次数 |
+| `agent.max_elapsed` | `2m` | 一轮运行的总耗时上限；不负责上下文或成本预算 |
 | `server.address` | `127.0.0.1:8080` | 网页服务监听地址 |
 
 直接启动网页服务：

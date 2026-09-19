@@ -13,7 +13,7 @@ func TestNewDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Model.Timeout != time.Minute || cfg.Model.APIKey != "" || cfg.Agent.MaxSteps != 8 {
+	if cfg.Model.Timeout != time.Minute || cfg.Model.APIKey != "" || cfg.Agent.MaxSteps != 8 || cfg.Agent.MaxElapsed != 2*time.Minute {
 		t.Fatalf("默认值不符合预期: %+v", cfg)
 	}
 	model, err := NewDefaults[Model]()
@@ -35,12 +35,12 @@ func yamlFile(t *testing.T, body string) string {
 func TestLoadYAML(t *testing.T) {
 	t.Setenv("OPENAI_MODEL", "ignored-model")
 	t.Setenv("WIKI_AGENT_AGENT_MAX_STEPS", "99")
-	path := yamlFile(t, "model:\n  api_key: test-key\n  name: yaml-model\n  timeout: 12s\nagent:\n  max_steps: 12\nmcp:\n  registry_file: mcp.yaml\n")
+	path := yamlFile(t, "model:\n  api_key: test-key\n  name: yaml-model\n  timeout: 12s\nagent:\n  max_steps: 12\n  max_elapsed: 45s\nmcp:\n  registry_file: mcp.yaml\n")
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Model.Name != "yaml-model" || cfg.Model.Timeout != 12*time.Second || cfg.Agent.MaxSteps != 12 {
+	if cfg.Model.Name != "yaml-model" || cfg.Model.Timeout != 12*time.Second || cfg.Agent.MaxSteps != 12 || cfg.Agent.MaxElapsed != 45*time.Second {
 		t.Fatal("YAML 或默认值没有正确加载")
 	}
 	if err := cfg.Validate(); err != nil {
@@ -59,7 +59,7 @@ func TestLoadIgnoresUnknownFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Agent.MaxSteps != 8 || cfg.Model.Timeout != time.Minute || cfg.MCP.Timeout != 30*time.Second {
+	if cfg.Agent.MaxSteps != 8 || cfg.Agent.MaxElapsed != 2*time.Minute || cfg.Model.Timeout != time.Minute || cfg.MCP.Timeout != 30*time.Second {
 		t.Fatalf("未知字段应忽略，缺省字段应使用默认值: %+v", cfg)
 	}
 	if err := cfg.Validate(); err != nil {
@@ -132,6 +132,7 @@ func TestValidation(t *testing.T) {
 		"超时无效":    func(c *Config) { c.Model.Timeout = 0 },
 		"未配置 MCP": func(c *Config) { c.MCP.RegistryFile = "" },
 		"步数无效":    func(c *Config) { c.Agent.MaxSteps = -1 },
+		"总时长无效":   func(c *Config) { c.Agent.MaxElapsed = 0 },
 	} {
 		t.Run(name, func(t *testing.T) {
 			cfg, err := NewDefaults[Config]()
