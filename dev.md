@@ -91,9 +91,12 @@ L01 曾通过 read_note 验证循环；L02 改用已登记的真实 MCP 工具�
 
 ### L03：规范工具参数与返回结果
 
+> 当前实现调整：先恢复最简 EINO 原生工具注册与中间件链路；下述 L03 业务校验和结果契约已撤出，待后续以中间件补充。L04 的统一入口目标仍待后续确认，当前不额外实现 execute_tool。详见 [工具注册说明](docs/tool-registry.md)。
+
+
 L02 已有多个工具，现在为它们建立共同的输入输出契约。
 
-- [x] 沿用 MCP 公布的参数 schema 检查顶层字段、类型、必填项与基本范围；路径范围、Markdown 文件类型与搜索限额另做业务校验。所有 MCP 工具统一返回固定 JSON 字段：`status`、`data.text`、`data.structured`、`error.code/message`、`source`、`truncated`、`continuation.tool/arguments/hint`。超限结果保留 UTF-8 文本前缀并明确标注；长笔记用现成 Files MCP 的 `read_file` 行窗口分页，其他过长结果缩小查询重试。
+- [ ] 沿用 MCP 公布的参数 schema 检查顶层字段、类型、必填项与基本范围；路径范围、Markdown 文件类型与搜索限额另做业务校验。所有 MCP 工具统一返回固定 JSON 字段：`status`、`data.text`、`data.structured`、`error.code/message`、`source`、`truncated`、`continuation.tool/arguments/hint`。超限结果保留 UTF-8 文本前缀并明确标注；长笔记用现成 Files MCP 的 `read_file` 行窗口分页，其他过长结果缩小查询重试。
 - **完成后：** 错误参数不会进入不适当的执行；模型能区分空结果、失败和内容不完整。已有工具全部遵守同一契约。
 
 ### L04：抽出统一工具执行器

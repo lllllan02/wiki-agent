@@ -5,6 +5,7 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/compose"
 )
 
 // RegisterTools 将任意来源的标准 Go 工具注册到 Agent，包括自定义 Tool 和 MCP Tool。
@@ -12,7 +13,12 @@ import (
 // EINO v0.9.19 的静态 ReAct 配置会在并发 Run 时改写 cancelCtx；
 // 将工具保存在 handler 中，每轮独立构建执行配置，避免 SDK 数据竞争。
 // 必须在 NewChatModelAgent 之前调用；升级 EINO 后可重新评估这层适配。
-func RegisterTools(cfg *adk.ChatModelAgentConfig, tools []tool.BaseTool) {
+// middlewares 按传入顺序进入，反序退出；前后操作由各中间件围绕 next 实现。
+func RegisterTools(cfg *adk.ChatModelAgentConfig, tools []tool.BaseTool, middlewares ...compose.ToolMiddleware) {
+	// 直接使用 EINO 原生中间件：同时支持普通、流式及增强工具接口。
+	cfg.ToolsConfig.ToolCallMiddlewares = append(
+		append([]compose.ToolMiddleware(nil), cfg.ToolsConfig.ToolCallMiddlewares...), middlewares...,
+	)
 	// 把配置里原有的工具与传入的工具合并，不根据来源分别注册。
 	// 只复制切片，不重新创建工具；之后每轮 Run 都使用这些同一对象。
 	all := append(append([]tool.BaseTool(nil), cfg.ToolsConfig.Tools...), tools...)

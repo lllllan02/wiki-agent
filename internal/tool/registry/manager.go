@@ -1,4 +1,4 @@
-// Package registry 连接 MCP 工具、复用连接，并在每次执行时施加 Wiki 范围约束。
+// Package registry 管理共享 MCP 连接，并将标准工具与中间件注册到 EINO。
 // mcp 包负责协议与工具发现；EINO 负责按名称选择工具。这里不再维护另一份调用分发表。
 package registry
 
@@ -68,7 +68,7 @@ func LoadMCP(lifetime context.Context, cfg config.MCP) (_ *Manager, err error) {
 	if err != nil {
 		return nil, err
 	}
-	// Open 自己清理连接阶段的失败；这里负责后续包装或校验失败时回滚。
+	// Open 清理连接阶段的失败；这里负责发布前失败时回滚。
 	defer func() {
 		if err != nil {
 			connections.Close()
@@ -77,51 +77,11 @@ func LoadMCP(lifetime context.Context, cfg config.MCP) (_ *Manager, err error) {
 	if len(connections.Tools) == 0 {
 		return nil, fmt.Errorf("没有可用的 MCP 工具；请启用至少一个服务")
 	}
-	servers := make(map[string]mcptools.Server, len(source.Servers))
-	for _, server := range source.Servers {
-		servers[server.Name] = server
-	}
-	seen := make(map[string]bool, len(connections.Tools))
-	tools := make([]tool.BaseTool, 0, len(connections.Tools))
-	// 只包装发现后的工具：保留 MCP 给出的 schema，再加本应用的执行检查。
-	// seen 只用于启动时拒绝重名；运行时的名称分发仍由 EINO 完成。
-	for _, base := range connections.Tools {
-		info, err := base.Info(lifetime)
-		if err != nil {
-			return nil, err
-		}
-		if info == nil || info.Name == "" {
-			return nil, fmt.Errorf("工具名称不能为空")
-		}
-		if seen[info.Name] {
-			return nil, fmt.Errorf("工具名称重复: %s", info.Name)
-		}
-		seen[info.Name] = true
-		invokable, ok := base.(tool.InvokableTool)
-		if !ok {
-			return nil, fmt.Errorf("工具 %s 不支持调用", info.Name)
-		}
-		// MCP 层把名称改为「服务器名__工具名」，据此找到 path_parameters。
-		// 包装对象只保存执行所需字段，不复制命令、认证头等整份服务配置。
-		name, _, found := strings.Cut(info.Name, "__")
-		server, known := servers[name]
-		if !found || !known {
-			return nil, fmt.Errorf("工具 %s 没有对应的 MCP 配置", info.Name)
-		}
-		if info.Name == "files__read_file" {
-			info.Desc += " 本应用仅允许读取 Markdown；必须传 1-based offset 和 1 到 200 的 limit，按返回的 continuation 继续。"
-		}
-		guarded := &executionTool{
-			upstream: invokable, info: info, pathParameters: server.PathParameters,
-			timeout: cfg.Timeout, maxBytes: cfg.MaxBytes,
-		}
-		tools = append(tools, guarded)
-	}
 	if err := lifetime.Err(); err != nil {
 		return nil, err
 	}
 	// 全部成功后才发布；应用退出时自动移除并关闭连接。
-	manager := &Manager{key: key, tools: tools, connections: connections, closed: make(chan struct{})}
+	manager := &Manager{key: key, tools: append([]tool.BaseTool(nil), connections.Tools...), connections: connections, closed: make(chan struct{})}
 	sharedManagers.items[key] = manager
 	context.AfterFunc(lifetime, manager.Close)
 	return manager, nil

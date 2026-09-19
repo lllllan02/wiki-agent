@@ -56,6 +56,7 @@ func TestAgentSearchReadAnswerWithMCP(t *testing.T) {
 		t.Fatal(err)
 	}
 	modelCalls := 0
+	var receivedRoots []string
 	model := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		modelCalls++
 		var request struct {
@@ -88,8 +89,11 @@ func TestAgentSearchReadAnswerWithMCP(t *testing.T) {
 		var payload string
 		switch (modelCalls-1)%3 + 1 {
 		case 1:
-			if len(request.Messages) != 2 || request.Messages[0].Role != "system" || request.Messages[1].Role != "user" {
+			if len(request.Messages) != 3 || request.Messages[0].Role != "system" || request.Messages[1].Role != "system" || request.Messages[2].Role != "user" {
 				t.Errorf("单轮请求混入其他轮消息: %+v", request.Messages)
+			}
+			if len(request.Messages) == 3 {
+				receivedRoots = append(receivedRoots, request.Messages[1].Content)
 			}
 			payload = `{"id":"one","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"search-1","type":"function","function":{"name":"ripgrep__search","arguments":"{\"pattern\":\"缓存穿透\",\"path\":\".\"}"}}]},"finish_reason":"tool_calls"}]}`
 		case 2:
@@ -137,6 +141,11 @@ func TestAgentSearchReadAnswerWithMCP(t *testing.T) {
 		result, err := agents[i].Stream(runcontext.With(context.Background(), runcontext.Metadata{WikiRoot: runRoot, SessionID: "fixture"}), "缓存穿透如何处理？", func(string) error { return nil })
 		if err != nil || result == nil || result.Answer == "" {
 			t.Fatalf("Agent MCP 闭环失败: %v", err)
+		}
+	}
+	for i, root := range []string{root, other, root} {
+		if len(receivedRoots) != 3 || receivedRoots[i] != fmt.Sprintf("本轮 Wiki 根目录：%q", root) {
+			t.Fatalf("模型未收到本轮目录: %v", receivedRoots)
 		}
 	}
 	if modelCalls != 9 || searchCalls != 3 || readCalls != 3 || initializations != 2 {

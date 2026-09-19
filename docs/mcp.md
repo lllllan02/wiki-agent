@@ -46,12 +46,12 @@ mcp:
 | `command` / `args` / `env` | 本地服务启动参数；直接启动进程，不通过 shell 拼接 |
 | `url` / `headers` | HTTP 服务地址和认证头；不回显到模型或错误页面 |
 | `tools` | 必须显式列出使用的工具；空列表报错，不自动开放全部能力 |
-| `path_parameters` | 需要绑定当前 Wiki 的顶层路径参数名；当前只用于已存在的文件/目录 |
+| `path_parameters` | 保留的路径参数声明；当前最简注册链路不执行路径改写或检查 |
 
 本地命令参数只支持 `${PROJECT_ROOT}`（注册表所在目录）。知识库目录通过每次工具调用的参数传入，不支持启动时绑定 `${WIKI_ROOT}`。不要把注册表放到任意位置后仍假设 PROJECT_ROOT 指向仓库。
 
 - Filesystem / ripgrep：默认启用；Filesystem 读取仅限 `.md`。ripgrep 仅开放基础 `search`，强制 Markdown、关闭颜色并限制参数；其 `maxResults` 是每个文件的匹配上限，最终工具输出另有总字节上限。
-- Files：默认只读启用，只开放 `read_file` 的行窗口分页；启动根目录设为 `/` 以支持多个 Wiki，实际访问仍由逐次调用的路径检查限制在当前 Wiki。`offset` 从 1 开始，`limit` 最多 200 行。
+- Files：默认只读启用，只开放 `read_file` 的行窗口分页；启动根目录设为 `/` 以支持多个 Wiki，调用方直接传递绝对路径和分页参数。`offset` 从 1 开始，具体限制以服务 schema 为准。
 - Tavily：在本地副本中填写认证头，再设 `enabled: true`。注册不代表凭据已验证。
 - Playwright：已安装 MCP Server，选择系统 Chrome。当前只预登记基本观察工具；浏览器进程、页面交互和站点限制还须在 L23 验收。
 - Git：安装上述 Python 环境后，仅在当前 Wiki 是 Git 仓库时启用。不能将“允许本仓库路径”理解为已具备不可信 Git 配置的隔离沙箱。
@@ -69,13 +69,13 @@ Agent 构造时调用 `manager.Tools()`，再用 `registry.RegisterTools(agentCo
 
 EINO v0.9.19 直接静态注册工具后，同一 Agent 并发 Run 会竞争内部 ReAct 的 `cancelCtx`。`RegisterTools` 将同一组标准工具注册到固定 handler 中，使 SDK 为每轮构建独立执行配置；handler 不执行工具发现、连接打开或目录包装。这是 SDK 适配，不要求各 Agent 实现自己的工具生命周期。
 
-Filesystem MCP 目前以 `/` 作为进程启动根目录，因此跨目录复用不依赖重启；逐次访问范围由 Agent 工具执行层按真实路径限制。此进程本身拥有较宽的文件访问能力，只供本地 Agent 独占连接。当前执行层拒绝越界和符号链接逃逸；这是调用前检查，不是恶意并发改写路径下的 OS 沙箱。当前知识库仍按原项目约定由用户控制。未来放开写入、浏览器动作和不可信服务时，再补相应权限与隔离机制。
+当前工具注册链路采用 EINO 原生工具接口与中间件，详见 [Tool Registry](tool-registry.md)。Filesystem MCP 以 `/` 作为启动根目录以复用进程；当前应用层不再执行 Wiki 路径限制。调用方传递绝对路径，访问能力由 MCP 服务配置决定。
 
-L03 后，进入模型的工具结果统一为固定字段的 JSON。`status` 为 `ok`、`empty`、`error` 或 `truncated`；`data` 始终是对象，其中 `text` 是完整文本或明确标记的前缀，`structured` 保留 MCP 的 `structuredContent`（没有时为 `null`）；`error` 是带 `code`、`message` 的对象或 `null`；`source` 是工具名；`truncated` 是布尔值；`continuation` 是带 `tool`、`arguments`、`hint` 的对象或 `null`。例如分页读取后的结果包含 `"continuation":{"tool":"files__read_file","arguments":{"path":"note.md","offset":51,"limit":50}}`，模型可直接按参数继续调用。参数先按 MCP 公布的 schema 检查顶层必填字段、类型与基本范围，再执行 Wiki 路径、Markdown 类型和搜索限制等业务检查；复杂组合 schema 仍由上游服务验证。`mcp.max_bytes` 限制 `data.text` 与 `data.structured` 的总字节数，包装本身会额外占用少量字节，也不限制上游生成结果的内存。长 Markdown 可用现成 Files MCP 的 `files__read_file` 按 1-based `offset` 和 `limit`（最多 200 行）分页读取；若单页仍超限，应缩小 `limit` 重试。其他长结果需缩小查询范围。EINO 当前适配器把 MCP 结果序列化成文本，截图多模态接入尚未验收，因此没有将截图工具加入现有白名单。
+工具结果由官方适配器原样交给 EINO；当前没有额外参数校验、逐次调用超时、Markdown 限制、输出截断或 `status/data/continuation` 包装。`path_parameters` 与 `mcp.max_bytes` 保留兼容，等待后续中间件接入。Files MCP 的分页直接使用上游 `offset` / `limit` 参数和返回结果。
 
 ## 验证
 
-普通测试使用本机 HTTP MCP 测试服务器验证认证、工具白名单、缺失工具及结果截断，不依赖外部服务。
+普通测试使用本机 HTTP MCP 测试服务器验证认证、工具白名单、缺失工具及原生中间件调用，不依赖外部服务。
 
 ```sh
 go test ./...
@@ -93,9 +93,9 @@ WIKI_AGENT_MCP_INTEGRATION=1 go test ./internal/tool/mcp -run TestInstalledServe
 
 ### MCP 复用边界
 
-- Filesystem：启动目录是服务允许访问的范围。当前以 `/` 启动共享进程，执行层按本轮 Wiki 检查每个路径。不要在并发运行中修改服务全局 roots 来切换 Wiki。
+- Filesystem：启动目录是服务允许访问的范围。当前以 `/` 启动共享进程，调用方传递明确的绝对路径，当前应用层不检查 Wiki 范围。不要在并发运行中修改服务全局 roots 来切换 Wiki。
 - ripgrep：每次调用传入 `path`，可以共享连接。
-- Git：已安装版本的 `--repository` 是可选的范围限制；省略后每次调用使用 `repo_path`。所有目录复用同一个服务，执行层继续校验路径。
+- Git：已安装版本的 `--repository` 是可选的范围限制；省略后每次调用使用 `repo_path`。所有目录复用同一个服务，调用方直接传递 repo_path。
 - Tavily：无本地目录绑定，可共享连接。Memory：示例使用应用级固定存储文件，由所有 Agent 和 Wiki 共用。
 - Playwright：进程可复用，但浏览器页面和登录状态也会共享；当前仍禁用，会话隔离属于后续浏览器功能设计。
 

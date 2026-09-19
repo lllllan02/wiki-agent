@@ -12,6 +12,7 @@ import (
 	"github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 	"github.com/lllllan02/wiki-agent/internal/config"
 	toolregistry "github.com/lllllan02/wiki-agent/internal/tool/registry"
@@ -69,7 +70,18 @@ func TestSingleAgentIsolatesRunTools(t *testing.T) {
 	tools := []tool.BaseTool{runFixtureTool{}}
 	makeAgent := func() adk.Agent {
 		agentConfig := &adk.ChatModelAgentConfig{Name: "fixture", Model: model, MaxIterations: cfg.Agent.MaxSteps}
-		toolregistry.RegisterTools(agentConfig, tools)
+		toolregistry.RegisterTools(agentConfig, tools, compose.ToolMiddleware{
+			Invokable: func(next compose.InvokableToolEndpoint) compose.InvokableToolEndpoint {
+				return func(ctx context.Context, input *compose.ToolInput) (*compose.ToolOutput, error) {
+					// 验证动态注入的工具同样经过 Agent 的原生中间件，并保留每轮 context。
+					output, err := next(ctx, input)
+					if err != nil {
+						return nil, err
+					}
+					return &compose.ToolOutput{Result: "middleware:" + output.Result}, nil
+				}
+			},
+		})
 		shared, err := adk.NewChatModelAgent(ctx, agentConfig)
 		if err != nil {
 			t.Fatal(err)
@@ -103,8 +115,8 @@ func TestSingleAgentIsolatesRunTools(t *testing.T) {
 				}
 			}
 		}
-		if answer != want {
-			t.Errorf("%s: got %q, want %q", name, answer, want)
+		if answer != "middleware:"+want {
+			t.Errorf("%s: got %q, want %q", name, answer, "middleware:"+want)
 		}
 	}
 	for round := 0; round < 2; round++ {

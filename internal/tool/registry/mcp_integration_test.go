@@ -13,7 +13,6 @@ import (
 
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/lllllan02/wiki-agent/internal/config"
-	"github.com/lllllan02/wiki-agent/internal/runcontext"
 )
 
 func TestInstalledSharedGit(t *testing.T) {
@@ -51,19 +50,16 @@ func TestInstalledSharedGit(t *testing.T) {
 	}
 	read := tools[0].(tool.InvokableTool)
 	for i, root := range roots {
-		ctx := runcontext.With(ctx, runcontext.Metadata{WikiRoot: root})
-		result, err := read.InvokableRun(ctx, `{"repo_path":"."}`)
+		args, _ := json.Marshal(map[string]string{"repo_path": root})
+		result, err := read.InvokableRun(ctx, string(args))
 		if err != nil || !strings.Contains(result, fmt.Sprintf("wiki-%d.md", i)) || strings.Contains(result, fmt.Sprintf("wiki-%d.md", 1-i)) {
 			t.Fatalf("Git 目录未隔离: %s %v", result, err)
 		}
-		outside, _ := json.Marshal(map[string]string{"repo_path": roots[1-i]})
-		if result, err := read.InvokableRun(ctx, string(outside)); err != nil || !strings.Contains(result, `"status":"error"`) {
-			t.Fatal("Git 越界路径未拒绝")
-		}
+
 	}
 }
 
-// 显式验收已安装的 Filesystem Server：同一个进程跨 Wiki 使用，执行层仍拦截越界读取。
+// 显式验收已安装的 Filesystem Server：同一个进程复用，参数与结果原样传递。
 func TestInstalledSharedFilesystem(t *testing.T) {
 	if os.Getenv("WIKI_AGENT_MCP_INTEGRATION") != "1" {
 		t.Skip("设置 WIKI_AGENT_MCP_INTEGRATION=1 验证已安装的 MCP")
@@ -96,7 +92,7 @@ func TestInstalledSharedFilesystem(t *testing.T) {
 	if first[0] != second[0] {
 		t.Fatal("工具对象未复用")
 	}
-	ctx := runcontext.With(context.Background(), runcontext.Metadata{WikiRoot: b})
+	ctx := context.Background()
 	if manager.connections != connections {
 		t.Fatal("默认 MCP 不应按目录增加进程")
 	}
@@ -115,26 +111,22 @@ func TestInstalledSharedFilesystem(t *testing.T) {
 	if read == nil {
 		t.Fatal("缺少 Filesystem 读取工具")
 	}
-	result, err := read.InvokableRun(ctx, `{"path":"note.md"}`)
+	args, _ := json.Marshal(map[string]string{"path": filepath.Join(b, "note.md")})
+	result, err := read.InvokableRun(ctx, string(args))
 	if err != nil || !strings.Contains(result, b) {
 		t.Fatalf("第二个目录无法使用共享 Filesystem: %s %v", result, err)
-	}
-	outside, _ := json.Marshal(map[string]string{"path": filepath.Join(a, "note.md")})
-	if result, err := read.InvokableRun(ctx, string(outside)); err != nil || !strings.Contains(result, `"status":"error"`) {
-		t.Fatal("共享进程不得绕过当前 Wiki 的访问边界")
 	}
 	if paged == nil {
 		t.Fatal("缺少现成分页 Files MCP 工具")
 	}
-	firstPage, err := paged.InvokableRun(ctx, `{"path":"long.md","offset":1,"limit":2}`)
-	if err != nil || !strings.Contains(firstPage, `"status":"truncated"`) || !strings.Contains(firstPage, `"offset":3`) || !strings.Contains(firstPage, "一") {
+	pageArgs, _ := json.Marshal(map[string]any{"path": filepath.Join(b, "long.md"), "offset": 1, "limit": 2})
+	firstPage, err := paged.InvokableRun(ctx, string(pageArgs))
+	if err != nil || !strings.Contains(firstPage, "一") {
 		t.Fatalf("Files MCP 首次分页失败: %s %v", firstPage, err)
 	}
-	lastPage, err := paged.InvokableRun(ctx, `{"path":"long.md","offset":3,"limit":3}`)
-	if err != nil || !strings.Contains(lastPage, `"status":"ok"`) || !strings.Contains(lastPage, "五") {
+	pageArgs, _ = json.Marshal(map[string]any{"path": filepath.Join(b, "long.md"), "offset": 3, "limit": 3})
+	lastPage, err := paged.InvokableRun(ctx, string(pageArgs))
+	if err != nil || !strings.Contains(lastPage, "五") {
 		t.Fatalf("Files MCP 续读失败: %s %v", lastPage, err)
-	}
-	if result, err := paged.InvokableRun(ctx, string(outside)); err != nil || !strings.Contains(result, `"status":"error"`) {
-		t.Fatal("Files MCP 越界读取未拒绝")
 	}
 }

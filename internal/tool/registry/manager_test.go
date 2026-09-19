@@ -82,7 +82,7 @@ func TestSharedConnectionsLifecycle(t *testing.T) {
 	ping := tools[0].(tool.InvokableTool)
 	callCtx, cancelCall := context.WithCancel(context.Background())
 	cancelCall()
-	if result, err := ping.InvokableRun(callCtx, `{}`); err != nil || !strings.Contains(result, `"status":"error"`) {
+	if _, err := ping.InvokableRun(callCtx, `{}`); err == nil {
 		t.Fatal("已取消调用应失败")
 	}
 	if result, err := ping.InvokableRun(context.Background(), `{}`); err != nil || !strings.Contains(result, "pong") {

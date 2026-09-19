@@ -2,7 +2,7 @@
 
 ## MCP 提前接入后的变化
 
-现已复用 EINO 官方 MCP Tool 适配器接入外部服务器。`internal/tool/mcp` 加载 `mcp.yaml`，负责 stdio / Streamable HTTP 连接、工具发现和命名；`internal/tool/registry` 在模型调用和 MCP 执行之间校验参数、路径范围并限制调用。外部工具实现仍来自依赖包。`mcp/` 保存 Node.js 依赖锁和 Git MCP 的 Python 依赖声明。
+现已复用 EINO 官方 MCP Tool 适配器接入外部服务器。`internal/tool/mcp` 加载 `mcp.yaml`，负责 stdio / Streamable HTTP 连接、工具发现和命名；`internal/tool/registry` 管理共享连接，并将工具及原生中间件注册到 EINO。外部工具实现仍来自依赖包。`mcp/` 保存 Node.js 依赖锁和 Git MCP 的 Python 依赖声明。
 
 WikiAgent 在构造时创建模型、从工具模块获取应用内共享的 MCP 管理器，并注册一次工具；默认 Filesystem 和 ripgrep 在此连接并发现，工具对象和 MCP 连接可供多个 Agent 复用。WikiAgent 只保留一个 EINO Agent，每轮通过上下文传入目录、创建支持流式输出的 Runner；运行方法不负责工具初始化或连接借用。
 
@@ -16,7 +16,7 @@ WikiAgent 在构造时创建模型、从工具模块获取应用内共享的 MCP
 
 ## 当前工具结构
 
-`internal/tool/mcp` 从 `mcp.yaml` 连接现成服务并应用白名单；`internal/tool/registry` 包装已发现的 MCP 工具并注册到 EINO，启动时检查重名；运行时名称分发由 EINO 负责，执行包装层校验 Wiki 路径边界、参数、超时和输出。文件列表、文件名搜索、正文搜索和读取由 Filesystem 与 ripgrep MCP 实现。没有另写同功能的 Wiki Tool。
+`internal/tool/mcp` 从 `mcp.yaml` 连接现成服务并应用白名单；`internal/tool/registry` 将已发现的 MCP 工具直接注册到 EINO；名称检查、分发和实际调用由框架负责，前后操作通过原生 ToolMiddleware 接入，默认不安装检查或结果包装。文件列表、文件名搜索、正文搜索和读取由 Filesystem 与 ripgrep MCP 实现。没有另写同功能的 Wiki Tool。
 
 `cmd` 负责入口，`internal/app` 创建 Agent 和 HTTP 服务，`internal/web` 维护网页会话。每个 Agent 在构造时接入工具，仅保存 EINO Agent，运行接口为 `Stream(ctx, request, onText)`，运行时创建 Runner。页面打开目录时由 Web 层检查目录存在性。首个 Agent 构造时建立 MCP 连接，后续 Agent 复用；工具组件随应用生命周期 context 关闭，MCP 初始化失败时立即清理。EINO ADK 负责模型调用、工具调用标识及结果回填。
 
