@@ -2,9 +2,7 @@ package agent
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"io"
 	"strings"
 	"time"
 
@@ -12,7 +10,7 @@ import (
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
-	"github.com/lllllan02/wiki-agent/internal/agent/plugins/checkpoint"
+	agentmiddleware "github.com/lllllan02/wiki-agent/internal/agent/middleware"
 	"github.com/lllllan02/wiki-agent/internal/config"
 	"github.com/lllllan02/wiki-agent/internal/runcontext"
 	toolmiddleware "github.com/lllllan02/wiki-agent/internal/tool/middleware"
@@ -20,10 +18,20 @@ import (
 )
 
 type Result struct {
-	Answer string
+	Answer    string
+	Interrupt *adk.InterruptInfo
 }
+type StreamEvent struct {
+	Message *schema.Message `json:"message"`
+}
+type EventReporter func(StreamEvent) error
 
-type CancelRegistrar = checkpoint.CancelRegistrar
+// RunRequest describes one execution. A fresh message and checkpoint resume
+// share the same entry point; optional hooks are UI concerns, not new modes.
+type RunRequest struct {
+	Message string
+	OnEvent EventReporter
+}
 
 var wikiReadToolNames = []string{
 	"filesystem__list_directory",
@@ -52,6 +60,7 @@ func NewWikiAgent(ctx context.Context, cfg config.Config) (*WikiAgent, error) {
 	}
 	agentConfig := &adk.ChatModelAgentConfig{
 		Name:          "wiki_agent",
+		Handlers:      []adk.ChatModelAgentMiddleware{&agentmiddleware.Interrupt{}},
 		Description:   "检索本地 Markdown 知识库并通过已配置工具收集资料",
 		Instruction:   systemPrompt,
 		Model:         cm,
@@ -87,125 +96,40 @@ func NewWikiAgent(ctx context.Context, cfg config.Config) (*WikiAgent, error) {
 	return &WikiAgent{agent: agent, maxElapsed: cfg.Agent.MaxElapsed}, nil
 }
 
-// Stream 执行一轮 Wiki 请求；消息组装、事件流和单条消息处理都在 WikiAgent 中。
-func (a *WikiAgent) Stream(ctx context.Context, request string, onText func(string) error) (*Result, error) {
-	return a.stream(ctx, request, nil, onText)
-}
-
-func (a *WikiAgent) StreamWithCheckPoint(ctx context.Context, request, checkPointID string, checkPointStore adk.CheckPointStore, onText func(string) error, onCancelReady CancelRegistrar) (*Result, error) {
-	plugin := &checkpoint.Plugin{ID: checkPointID, Store: checkPointStore, OnCancelReady: onCancelReady}
-	return a.stream(ctx, request, plugin, onText)
-}
-
-func (a *WikiAgent) ResumeWithCheckPoint(ctx context.Context, checkPointID string, checkPointStore adk.CheckPointStore, onText func(string) error, onCancelReady CancelRegistrar) (*Result, error) {
-	plugin := &checkpoint.Plugin{ID: checkPointID, Store: checkPointStore, Resume: true, OnCancelReady: onCancelReady}
-	return a.stream(ctx, "", plugin, onText)
-}
-
-func (a *WikiAgent) stream(ctx context.Context, request string, plugin *checkpoint.Plugin, onText func(string) error) (*Result, error) {
-	if (plugin == nil || !plugin.Resume) && strings.TrimSpace(request) == "" {
-		return nil, fmt.Errorf("用户请求不能为空")
-	}
+func (a *WikiAgent) Run(ctx context.Context, request RunRequest) (*Result, error) {
 	ctx = runcontext.WithRunID(ctx)
 	ctx, cancel := context.WithTimeout(ctx, a.maxElapsed)
 	defer cancel()
-
-	config := adk.RunnerConfig{Agent: a.agent, EnableStreaming: true}
-	plugin.Register(&config)
-	runner := adk.NewRunner(ctx, config)
-	var messages []*schema.Message
-	if plugin == nil || !plugin.Resume {
-		metadata := runcontext.From(ctx)
-		messages = []*schema.Message{schema.SystemMessage(fmt.Sprintf("本轮 Wiki 根目录：%q", metadata.WikiRoot))}
+	metadata := runcontext.From(ctx)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if (metadata.Resume || metadata.CheckpointID != "" || metadata.CheckpointStore != nil) &&
+		(metadata.CheckpointID == "" || metadata.CheckpointStore == nil) {
+		return nil, fmt.Errorf("checkpoint id and store are required")
+	}
+	r := adk.NewRunner(ctx, adk.RunnerConfig{
+		Agent: a.agent, EnableStreaming: true, CheckPointStore: metadata.CheckpointStore,
+	})
+	var events *adk.AsyncIterator[*adk.AgentEvent]
+	if metadata.Resume {
+		var err error
+		events, err = r.Resume(ctx, metadata.CheckpointID)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		if strings.TrimSpace(request.Message) == "" {
+			return nil, fmt.Errorf("用户请求不能为空")
+		}
+		messages := []*schema.Message{schema.SystemMessage(fmt.Sprintf("本轮 Wiki 根目录：%q", metadata.WikiRoot))}
 		messages = append(messages, metadata.History...)
-		messages = append(messages, schema.UserMessage(request))
+		messages = append(messages, schema.UserMessage(request.Message))
+		var options []adk.AgentRunOption
+		if metadata.CheckpointID != "" {
+			options = append(options, adk.WithCheckPointID(metadata.CheckpointID))
+		}
+		events = r.Run(ctx, messages, options...)
 	}
-	iter, err := plugin.Start(ctx, runner, messages)
-	if err != nil {
-		return nil, err
-	}
-	var answer string
-	for {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		event, ok := iter.Next()
-		if !ok {
-			break
-		}
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		if event.Err != nil {
-			return nil, event.Err
-		}
-		if event.Output == nil || event.Output.MessageOutput == nil {
-			continue
-		}
-		current, err := consumeMessage(ctx, event.Output.MessageOutput, onText)
-		if err != nil {
-			return nil, err
-		}
-		if strings.TrimSpace(current) != "" {
-			answer = current
-		}
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if strings.TrimSpace(answer) == "" {
-		return nil, fmt.Errorf("model returned an empty final answer")
-	}
-	return &Result{Answer: answer}, nil
-}
-
-// consumeMessage 只向页面发布助手正文；工具消息仍要完整读取。
-func consumeMessage(ctx context.Context, output *adk.MessageVariant, onText func(string) error) (string, error) {
-	if err := ctx.Err(); err != nil {
-		return "", err
-	}
-	if output.Role != schema.Assistant {
-		_, err := output.GetMessage()
-		if err != nil {
-			return "", err
-		}
-		return "", ctx.Err()
-	}
-	if !output.IsStreaming {
-		message, err := output.GetMessage()
-		if err != nil || message == nil || message.Content == "" {
-			return "", err
-		}
-		if err := ctx.Err(); err != nil {
-			return "", err
-		}
-		return message.Content, onText(message.Content)
-	}
-	if output.MessageStream == nil {
-		return "", fmt.Errorf("assistant message stream is nil")
-	}
-	defer output.MessageStream.Close()
-	var content strings.Builder
-	for {
-		if err := ctx.Err(); err != nil {
-			return "", err
-		}
-		chunk, err := output.MessageStream.Recv()
-		if errors.Is(err, io.EOF) {
-			return content.String(), nil
-		}
-		if err != nil {
-			return "", err
-		}
-		if err := ctx.Err(); err != nil {
-			return "", err
-		}
-		if chunk == nil || chunk.Content == "" {
-			continue
-		}
-		content.WriteString(chunk.Content)
-		if err := onText(content.String()); err != nil {
-			return "", err
-		}
-	}
+	return collectEvents(ctx, events, request.OnEvent)
 }

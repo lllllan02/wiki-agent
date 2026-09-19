@@ -80,6 +80,9 @@ func ContractMiddleware() compose.ToolMiddleware {
 					// 可以在这里记录 panic 栈。不要把 stack 放进工具结果，避免泄露本地路径。
 					_ = debug.Stack()
 				}
+				if _, interrupted := compose.IsInterruptRerunError(err); interrupted {
+					return // 中断是控制信号，必须交给 Eino 保存检查点。
+				}
 				if err != nil {
 					output = contractOutput(input.Name, "", err)
 					err = nil

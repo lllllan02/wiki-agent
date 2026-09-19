@@ -7,18 +7,18 @@
   <style>
     :root{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;color:#1d2939;background:#f6f8fb}
     *{box-sizing:border-box}body{margin:0}button,textarea,select{font:inherit}button{cursor:pointer}button:disabled{cursor:not-allowed;opacity:.55}
-    .app{max-width:1080px;min-height:100dvh;margin:auto;padding:28px 24px 32px;display:flex;flex-direction:column;gap:18px}
-    .top{display:flex;align-items:center;justify-content:space-between;gap:20px}h1{font-size:24px;letter-spacing:-.03em;margin:0}.subtitle{font-size:13px;color:#667085;margin:5px 0 0}
-    .project{display:flex;align-items:center;gap:10px;min-width:0;flex-wrap:wrap}.project-current{min-width:0;max-width:280px;display:flex;align-items:center;gap:8px;padding:9px 12px;border:1px solid #e1e6ed;border-radius:12px;background:#fff;color:#475467;font-size:13px}
+    .app{width:min(1280px,100%);min-width:0;min-height:100dvh;margin:auto;padding:22px 24px;display:grid;grid-template-columns:minmax(300px,340px) minmax(0,1fr);gap:18px}h1{font-size:20px;letter-spacing:-.03em;margin:0}.subtitle{font-size:13px;color:#667085;margin:5px 0 0}
+    .sidebar{min-width:0;min-height:0;border:1px solid #e4e9f0;border-radius:18px;background:#fff;box-shadow:0 12px 32px #26364a0a;display:flex;flex-direction:column;overflow:hidden}.sidebar-head{min-width:0;padding:20px;border-bottom:1px solid #edf0f4}.project{min-width:0;display:grid;gap:9px;margin-top:18px}.project-current{min-width:0;display:flex;align-items:center;gap:8px;padding:9px 10px;border:1px solid #e1e6ed;border-radius:10px;background:#f8faff;color:#475467;font-size:13px}
     .project-current span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.project-current svg{flex:none}
-    .project button,.composer button{border:0;border-radius:11px;background:#2563eb;color:#fff;font-weight:600;padding:10px 16px;white-space:nowrap}.project button:hover:not(:disabled),.composer button:hover:not(:disabled){background:#1d4ed8}.project button.secondary,.composer button.secondary{background:#eef4ff;color:#175cd3}.project button.danger,.composer button.danger{background:#fff1f1;color:#b42318}.composer button.neutral{background:#f2f4f7;color:#344054}
-    .recent,.sessions{border:1px solid #e1e6ed;border-radius:10px;background:#fff;color:#475467;padding:9px 10px;max-width:220px;font-size:13px}.recent[hidden],.sessions[hidden]{display:none}
-    .workspace{flex:1;min-height:540px;display:flex;flex-direction:column;background:#fff;border:1px solid #e4e9f0;border-radius:18px;box-shadow:0 12px 32px #26364a0a;overflow:hidden}
-    .conversation{flex:1;min-height:370px;max-height:calc(100dvh - 255px);overflow-y:auto;padding:28px clamp(20px,5vw,56px);scroll-behavior:smooth}
+    .project button,.composer button,.sidebar button{border:0;border-radius:11px;background:#2563eb;color:#fff;font-weight:600;padding:10px 12px;white-space:nowrap}.project button:hover:not(:disabled),.composer button:hover:not(:disabled),.sidebar button:hover:not(:disabled){background:#1d4ed8}.project button.secondary,.composer button.secondary,.sidebar button.secondary{background:#eef4ff;color:#175cd3}.composer button.danger,.sidebar button.danger{background:#fff1f1;color:#b42318}.composer button.neutral{background:#f2f4f7;color:#344054}
+    .recent{border:1px solid #e1e6ed;border-radius:10px;background:#fff;color:#475467;padding:9px 10px;font-size:13px}.recent[hidden]{display:none}.session-drawer{min-height:0;display:flex;flex-direction:column;flex:1}.session-drawer>summary{padding:14px;cursor:pointer;font-size:13px;font-weight:650;color:#475467;list-style:none;border-bottom:1px solid #edf0f4}.session-drawer>summary::-webkit-details-marker{display:none}.session-drawer>summary::after{content:'⌄';float:right;color:#98a2b3}.session-drawer:not([open])>summary::after{content:'›'}.session-nav{padding:10px 14px 14px;display:flex;flex-direction:column;min-height:0;flex:1}.session-list{overflow:auto;display:grid;gap:4px}.session-item{width:100%;display:grid;grid-template-columns:minmax(0,1fr) 30px;align-items:center;gap:4px;padding:3px;background:transparent!important;color:#475467!important;text-align:left;font-weight:500!important}.session-item:hover,.session-item.active{background:#eef4ff!important;color:#175cd3!important}.session-title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:7px 8px}.session-delete{width:28px;height:28px;padding:0!important;background:transparent!important;color:#98a2b3!important;font-size:17px}.session-delete:hover{background:#fff1f1!important;color:#b42318!important}.session-empty{padding:12px 8px;color:#98a2b3;font-size:13px}
+    .workspace{min-width:0;flex:1;min-height:540px;display:flex;flex-direction:column;background:#fff;border:1px solid #e4e9f0;border-radius:18px;box-shadow:0 12px 32px #26364a0a;overflow:hidden}
+    .conversation{flex:1;min-height:370px;max-height:calc(100dvh - 255px);overflow-y:auto;padding:28px clamp(20px,5vw,56px)}
     .empty{height:100%;min-height:300px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;color:#667085}
     .empty-icon{width:48px;height:48px;display:grid;place-items:center;border-radius:15px;background:#eff5ff;color:#2563eb;font-size:24px;margin-bottom:15px}.empty h2{font-size:18px;color:#344054;margin:0 0 7px}.empty p{font-size:14px;line-height:1.6;margin:0}
     .message{margin:0 0 28px;line-height:1.7}.message.user{display:flex;justify-content:flex-end}.user-bubble{max-width:min(78%,650px);padding:11px 16px;border-radius:18px 18px 5px 18px;background:#e9f1ff;color:#173864;white-space:pre-wrap;overflow-wrap:anywhere}
     .message.assistant{max-width:100%;color:#273445}.assistant-label{font-size:12px;font-weight:650;color:#667085;letter-spacing:.02em;margin-bottom:8px}
+    .message.assistant.superseded{opacity:.72;margin-bottom:14px}.message.assistant.superseded .assistant-label{color:#98a2b3}.activity{margin:0 0 12px;padding:10px 12px;border:1px solid #e3eaf5;border-radius:10px;background:#f8faff;color:#526174;font-size:13px}.activity summary{cursor:pointer;font-weight:600;color:#475467;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.activity ul{margin:8px 0 0;padding-left:18px}.activity li+li{margin-top:4px}.activity .live{color:#175cd3}
     .markdown{overflow-wrap:anywhere}.markdown>:first-child{margin-top:0}.markdown>:last-child{margin-bottom:0}
     .markdown p,.markdown ul,.markdown ol,.markdown blockquote,.markdown pre,.markdown table{margin:0 0 1em}.markdown h1,.markdown h2,.markdown h3,.markdown h4{line-height:1.35;margin:1.35em 0 .6em;color:#182230}
     .markdown h1{font-size:1.55em}.markdown h2{font-size:1.3em}.markdown h3{font-size:1.12em}.markdown ul,.markdown ol{padding-left:1.55em}.markdown li+li{margin-top:.25em}
@@ -28,22 +28,22 @@
     .notice{margin:0 0 22px;padding:10px 14px;border-radius:10px;background:#eff8f2;color:#26704a;font-size:13px;overflow-wrap:anywhere}.notice.error{background:#fff1f1;color:#b42318}
     .composer-wrap{border-top:1px solid #edf0f4;padding:16px clamp(16px,4vw,40px) 14px;background:#fff}.composer{display:flex;align-items:flex-end;gap:12px;padding:8px;border:1px solid #d8e0e9;border-radius:14px;box-shadow:0 2px 8px #1d293905}.composer:focus-within{border-color:#6a9df5;box-shadow:0 0 0 3px #2563eb18}
     textarea{flex:1;min-width:0;min-height:42px;max-height:180px;resize:vertical;border:0;outline:0;padding:10px 8px;background:transparent;color:#1d2939;line-height:1.5}textarea::placeholder{color:#98a2b3}.composer-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end}.composer button{min-width:66px;margin-bottom:1px}.composer button[hidden]{display:none}.tip{margin:10px 4px 0;color:#98a2b3;font-size:12px}
-    @media(max-width:720px){.app{padding:16px 12px;gap:12px}.top{align-items:flex-start;flex-direction:column}.project{width:100%;flex-wrap:wrap}.project-current{flex:1;max-width:none}.recent{max-width:100%}.workspace{min-height:calc(100dvh - 180px)}.conversation{max-height:none;padding:24px 18px}.user-bubble{max-width:90%}}
+    /* Switch before the fixed sidebar can squeeze the conversation panel. */
+    @media(max-width:1100px){.app{padding:12px;display:flex;flex-direction:column;gap:12px}.sidebar{width:100%;max-height:330px}.sidebar-head{padding:16px}.project{grid-template-columns:1fr}.project-current{grid-column:auto}.project .recent,.project #pickProject,.project #newSession{width:100%}.workspace{width:100%;min-height:calc(100dvh - 390px)}.conversation{max-height:none;padding:24px 18px}.user-bubble{max-width:90%}}
   </style>
 </head>
 <body>
   <main class="app">
-    <header class="top">
-      <div><h1>Wiki Agent</h1><p class="subtitle">探索本地知识库，整理你的想法</p></div>
+    <aside class="sidebar" aria-label="项目与对话">
+      <div class="sidebar-head"><h1>Wiki Agent</h1><p class="subtitle">探索本地知识库，整理你的想法</p>
       <div class="project">
         <div class="project-current" title="当前知识库"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10H3z"/></svg><span id="currentProject">尚未选择知识库</span></div>
         <select id="recentProjects" class="recent" aria-label="最近打开的知识库" hidden><option value="">最近打开</option></select>
         <button id="pickProject" type="button">选择知识库</button>
-        <select id="sessions" class="sessions" aria-label="选择对话" hidden><option value="">选择对话</option></select>
         <button id="newSession" type="button" class="secondary" disabled>新建对话</button>
-        <button id="deleteSession" type="button" class="danger" disabled>删除对话</button>
-      </div>
-    </header>
+      </div></div>
+      <details class="session-drawer" open><summary>对话</summary><nav class="session-nav"><div id="sessionList" class="session-list" aria-label="对话列表"></div></nav></details>
+    </aside>
     <section class="workspace" aria-label="对话">
       <div id="conversation" class="conversation" aria-live="polite">
         <div id="empty" class="empty"><div class="empty-icon">✦</div><h2>从你的知识库开始</h2><p>选择一个本地目录，然后向 Wiki Agent 提问。</p></div>
@@ -63,9 +63,8 @@
     const pickProject=document.querySelector('#pickProject');
     const currentProject=document.querySelector('#currentProject');
     const recentProjects=document.querySelector('#recentProjects');
-    const sessions=document.querySelector('#sessions');
+    const sessionList=document.querySelector('#sessionList');
     const newSession=document.querySelector('#newSession');
-    const deleteSession=document.querySelector('#deleteSession');
     const pauseRun=document.querySelector('#pauseRun');
     const resumeRun=document.querySelector('#resumeRun');
     const cancelRun=document.querySelector('#cancelRun');
@@ -76,6 +75,7 @@
     let busy=false;
     let activeStreams=0;
     let runState='idle';
+    const activeRenders=new Set();
     const controlPending=new Set();
     function scrollToBottom(){conversation.scrollTop=conversation.scrollHeight}
     function notice(message,error=false){
@@ -102,9 +102,29 @@
       return row;
     }
     function setAssistantHTML(row,html){
+      const follow=conversation.scrollHeight-conversation.scrollTop-conversation.clientHeight<80;
       const body=row.querySelector('.markdown');body.innerHTML=html;
       for(const link of body.querySelectorAll('a')){link.target='_blank';link.rel='noopener noreferrer'}
-      scrollToBottom();
+      if(follow)scrollToBottom();
+    }
+    function addActivity(row){
+      const details=document.createElement('details');details.className='activity';
+      const summary=document.createElement('summary');summary.textContent='Agent 正在准备…';
+      const list=document.createElement('ul');details.append(summary,list);row.insertBefore(details,row.querySelector('.markdown'));
+      return {details,list};
+    }
+    function addProgress(activity,detail){
+      if(!detail)return;
+      const item=document.createElement('li');item.className='live';item.textContent=detail;activity.list.appendChild(item);
+      activity.details.querySelector('summary').textContent='Agent：'+detail;
+    }
+    function supersedeActiveRenders(){
+      for(const render of activeRenders){
+        render.superseded=true;render.row.classList.add('superseded');
+        render.row.querySelector('.assistant-label').textContent='Wiki Agent · 已被后续要求取代';
+        render.activity.details.open=false;
+        const item=document.createElement('li');item.textContent='已接收新的要求，停止使用此轮输出。';render.activity.list.appendChild(item);
+      }
     }
     function recentRoots(){try{return JSON.parse(localStorage.getItem('wikiRecentProjects')||'[]').filter(x=>typeof x==='string')}catch{return []}}
     function showRecent(){
@@ -128,9 +148,7 @@
       input.disabled=!activeRoot||!activeSession;
       pickProject.disabled=value;
       recentProjects.disabled=value;
-      sessions.disabled=value||!activeRoot;
       newSession.disabled=value||!activeRoot;
-      deleteSession.disabled=value||!activeRoot||!activeSession;
       pauseRun.disabled=!ready||controlPending.has('pause')||runState!=='running';
       resumeRun.disabled=!ready||controlPending.has('resume')||runState!=='paused';
       cancelRun.disabled=!ready||controlPending.has('cancel')||!(runState==='running'||runState==='paused');
@@ -182,9 +200,10 @@
     }
     async function streamMessage(message,{showUser=true,resume=false}={}){
       if((!message&&!resume)||!activeRoot||!activeSession)return;
-      if(showUser)addUser(message);
+      if(showUser){supersedeActiveRenders();addUser(message);}
       beginStream();
       const waiting=addAssistant('<p>正在处理…</p>');
+      const render={row:waiting,activity:addActivity(waiting),superseded:false,tools:new Set()};activeRenders.add(render);
       let hasUpdate=false;
       try{
         const res=await fetch('/api/chat/stream',{method:'POST',headers:{'Content-Type':'application/json','X-Conversation-ID':conversationId},body:JSON.stringify({message,resume})});
@@ -199,9 +218,20 @@
           if(!line.trim())return;
           const event=JSON.parse(line);
           if(event.type==='error')throw new Error(event.error||'回答失败');
-          if(event.type==='update'||event.type==='done'){
-            // update 来自 Agent 的 onText；done 表示整轮 Agent 已结束。
-            setAssistantHTML(waiting,event.html||'');hasUpdate=true;
+          if(event.type==='message'){
+            const message=event.message||{};
+            if(message.role==='tool'){if(!render.superseded)addProgress(render.activity,(message.tool_name||'工具')+' 已返回结果');return}
+            for(const call of message.tool_calls||[]){
+              const key=call.id||call.function?.name;
+              if(!render.superseded&&key&&call.function?.name&&!render.tools.has(key)){render.tools.add(key);addProgress(render.activity,call.function.name)}
+            }
+            if(message.role!=='assistant'||!message.content)return;
+            if(!render.superseded){setAssistantHTML(waiting,event.html||'');hasUpdate=true;}
+            return;
+          }
+          if(event.type==='text'||event.type==='done'){
+            // 实时消息和历史记录使用同一套服务端 Markdown 渲染。
+            if(!render.superseded){setAssistantHTML(waiting,event.html||'');hasUpdate=true;}
             if(event.type==='done')done=true;
           }
         };
@@ -216,9 +246,12 @@
         if(pending.trim())handleLine(pending);
         if(!done)throw new Error('回答连接提前中断');
       }catch(err){
-        if(!hasUpdate)waiting.remove();
-        notice(err.message,true);
+        if(!hasUpdate&&!render.superseded)waiting.remove();
+        if(!render.superseded&&!String(err.message).includes('任务已根据新要求重新规划'))notice(err.message,true);
       }finally{
+        activeRenders.delete(render);
+        for(const item of render.activity.list.querySelectorAll('.live'))item.classList.remove('live');
+        if(!render.superseded)render.activity.details.querySelector('summary').textContent='Agent 工作过程（'+render.activity.list.children.length+' 项）';
         endStream();
         input.focus();
       }
@@ -227,14 +260,16 @@
       const res=await fetch('/api/sessions',{headers:{'X-Conversation-ID':conversationId}});
       const data=await res.json();
       if(!res.ok||data.error)throw new Error(data.error||'无法读取对话列表');
-      sessions.replaceChildren(new Option('选择对话',''));
+      sessionList.replaceChildren();
       for(const session of data.sessions||[]){
         const label=session.title+(session.message_count?` · ${session.message_count} 条`:'');
-        sessions.add(new Option(label,session.id));
+        const row=document.createElement('div');row.className='session-item'+(session.id===selected?' active':'');
+        const choose=document.createElement('button');choose.type='button';choose.className='session-title';choose.textContent=label;choose.title=session.title;choose.dataset.session=session.id;
+        const remove=document.createElement('button');remove.type='button';remove.className='session-delete';remove.textContent='×';remove.title='删除对话';remove.setAttribute('aria-label','删除 '+session.title);remove.dataset.deleteSession=session.id;
+        row.append(choose,remove);sessionList.appendChild(row);
       }
-      sessions.hidden=false;
+      if(!(data.sessions||[]).length){const empty=document.createElement('p');empty.className='session-empty';empty.textContent='还没有对话';sessionList.appendChild(empty)}
       activeSession=selected;
-      sessions.value=selected;
       resetRunState();
     }
     async function selectSession(sessionId){
@@ -242,7 +277,7 @@
       const data=await res.json();
       if(!res.ok||data.error)throw new Error(data.error||'无法选择对话');
       activeSession=data.session_id;
-      sessions.value=activeSession;
+      for(const item of sessionList.querySelectorAll('.session-item'))item.classList.toggle('active',item.querySelector('[data-session]')?.dataset.session===activeSession);
       conversation.replaceChildren();
       const restored=await loadMessages();
       if(!restored)notice('新对话已创建');
@@ -294,19 +329,24 @@
       }catch(err){notice(err.message,true)}finally{setBusy(false);recentProjects.value=''}
     }
     recentProjects.addEventListener('change',()=>{if(recentProjects.value)openRecent(recentProjects.value)});
-    sessions.addEventListener('change',async()=>{if(!sessions.value)return;setBusy(true);try{await selectSession(sessions.value)}catch(err){notice(err.message,true)}finally{setBusy(false)}});
+    sessionList.addEventListener('click',async event=>{
+      const remove=event.target.closest('[data-delete-session]');
+      const choose=event.target.closest('[data-session]');
+      if(remove){await deleteSessionByID(remove.dataset.deleteSession);return}
+      if(choose){setBusy(true);try{await selectSession(choose.dataset.session)}catch(err){notice(err.message,true)}finally{setBusy(false)}}
+    });
     newSession.addEventListener('click',async()=>{setBusy(true);try{await createSession()}catch(err){notice(err.message,true)}finally{setBusy(false)}});
-    deleteSession.addEventListener('click',async()=>{
-      if(!activeSession||!confirm('删除当前对话？'))return;
+    async function deleteSessionByID(sessionID){
+      if(!sessionID)return;
       setBusy(true);
       try{
-        const res=await fetch('/api/sessions/'+encodeURIComponent(activeSession),{method:'DELETE',headers:{'X-Conversation-ID':conversationId}});
+        const res=await fetch('/api/sessions/'+encodeURIComponent(sessionID),{method:'DELETE',headers:{'X-Conversation-ID':conversationId}});
         const data=await res.json();
         if(!res.ok||data.error)throw new Error(data.error||'无法删除对话');
-        activeSession='';conversation.replaceChildren();notice('对话已删除，请选择或新建一个对话。');
+        if(activeSession===sessionID){activeSession='';conversation.replaceChildren();notice('对话已删除，请选择或新建一个对话。');}
         await refreshSessions();
       }catch(err){notice(err.message,true)}finally{setBusy(false)}
-    });
+    }
     pauseRun.addEventListener('click',()=>control('pause','/api/chat/pause','暂停请求','paused'));
     resumeRun.addEventListener('click',resumeTask);
     cancelRun.addEventListener('click',()=>control('cancel','/api/chat/cancel','取消请求','idle'));
@@ -332,6 +372,7 @@
     showRecent();
     fetch('/api/project',{headers:{'X-Conversation-ID':conversationId}}).then(res=>res.json()).then(data=>{
       if(data.root)applyProject(data.root,{sessionId:data.session_id||''});
+      else if(recentRoots()[0])openRecent(recentRoots()[0]);
     }).catch(err=>notice('读取当前知识库失败：'+err.message,true));
   </script>
 </body>

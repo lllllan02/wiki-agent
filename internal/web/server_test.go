@@ -25,16 +25,8 @@ import (
 
 type checkpointStubAgent struct{}
 
-func (*checkpointStubAgent) Stream(context.Context, string, func(string) error) (*agent.Result, error) {
+func (*checkpointStubAgent) Run(context.Context, agent.RunRequest) (*agent.Result, error) {
 	return nil, errors.New("unexpected plain stream")
-}
-
-func (*checkpointStubAgent) StreamWithCheckPoint(context.Context, string, string, adk.CheckPointStore, func(string) error, agent.CancelRegistrar) (*agent.Result, error) {
-	return nil, errors.New("unexpected checkpoint stream")
-}
-
-func (*checkpointStubAgent) ResumeWithCheckPoint(context.Context, string, adk.CheckPointStore, func(string) error, agent.CancelRegistrar) (*agent.Result, error) {
-	return nil, errors.New("unexpected resume")
 }
 
 func TestPausedStateRequiresSavedCheckpoint(t *testing.T) {
@@ -51,7 +43,7 @@ func TestPausedStateRequiresSavedCheckpoint(t *testing.T) {
 	}
 	checkpointID := s.sessions.CheckPointID(root, sessionID)
 	requestPause()
-	if err := s.markStoppedAfterCancel(root, sessionID, true, checkpointID); err == nil {
+	if err := s.markStopped(root, sessionID, checkpointID); err == nil {
 		t.Fatal("reported a resumable pause without a checkpoint")
 	}
 	state, err := s.sessions.LoadSessionState(root, sessionID)
@@ -62,7 +54,7 @@ func TestPausedStateRequiresSavedCheckpoint(t *testing.T) {
 	if err := s.sessions.Set(context.Background(), checkpointID, []byte("checkpoint")); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.markStoppedAfterCancel(root, sessionID, true, checkpointID); err != nil {
+	if err := s.markStopped(root, sessionID, checkpointID); err != nil {
 		t.Fatal(err)
 	}
 	state, err = s.sessions.LoadSessionState(root, sessionID)
@@ -73,12 +65,12 @@ func TestPausedStateRequiresSavedCheckpoint(t *testing.T) {
 
 type progressAgent struct{ release chan struct{} }
 
-func (a *progressAgent) Stream(_ context.Context, _ string, onText func(string) error) (*agent.Result, error) {
-	if err := onText("# 开始"); err != nil {
+func (a *progressAgent) Run(_ context.Context, request agent.RunRequest) (*agent.Result, error) {
+	if err := emitTestMessage(request, "# 开始"); err != nil {
 		return nil, err
 	}
 	<-a.release
-	if err := onText("# 完成"); err != nil {
+	if err := emitTestMessage(request, "# 完成"); err != nil {
 		return nil, err
 	}
 	return &agent.Result{Answer: "# 完成"}, nil
@@ -89,6 +81,13 @@ func newTestServer(t *testing.T, wikiAgent WikiAgent) *Server {
 	s := New(wikiAgent)
 	s.sessions = store.NewIn(t.TempDir())
 	return s
+}
+
+func emitTestMessage(request agent.RunRequest, text string) error {
+	if request.OnEvent == nil {
+		return nil
+	}
+	return request.OnEvent(agent.StreamEvent{Message: schema.AssistantMessage(text, nil)})
 }
 
 func TestStreamChatFlushesBeforeCompletion(t *testing.T) {
@@ -141,7 +140,7 @@ func TestStreamChatFlushesBeforeCompletion(t *testing.T) {
 	if err := json.Unmarshal(scanner.Bytes(), &first); err != nil {
 		t.Fatal(err)
 	}
-	if first.Type != "update" || !strings.Contains(first.HTML, "<h1>开始</h1>") {
+	if first.Type != "message" || first.Message == nil || first.Message.Content != "# 开始" {
 		t.Fatalf("first update: %+v", first)
 	}
 	close(fake.release)
@@ -156,7 +155,7 @@ func TestStreamChatFlushesBeforeCompletion(t *testing.T) {
 	if err := scanner.Err(); err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 2 || events[0].Type != "update" || events[1].Type != "done" || !strings.Contains(events[1].HTML, "<h1>完成</h1>") {
+	if len(events) != 2 || events[0].Type != "message" || events[0].Message == nil || events[0].Message.Content != "# 完成" || events[1].Type != "done" || events[1].Content != "# 完成" {
 		t.Fatalf("final events: %+v", events)
 	}
 }
@@ -195,9 +194,9 @@ func TestPickProject(t *testing.T) {
 
 type markdownAgent struct{}
 
-func (markdownAgent) Stream(_ context.Context, _ string, onText func(string) error) (*agent.Result, error) {
+func (markdownAgent) Run(_ context.Context, request agent.RunRequest) (*agent.Result, error) {
 	result := &agent.Result{Answer: "# 标题\n\n| A | B |\n| - | - |\n| 1 | 2 |\n\n<script>alert(1)</script>\n\n[bad](javascript:alert(1))"}
-	return result, onText(result.Answer)
+	return result, emitTestMessage(request, result.Answer)
 }
 
 func TestChatRendersSafeMarkdown(t *testing.T) {
@@ -226,11 +225,15 @@ func TestChatRendersSafeMarkdown(t *testing.T) {
 	if err := json.Unmarshal([]byte(strings.SplitN(result.Body.String(), "\n", 2)[0]), &response); err != nil {
 		t.Fatal(err)
 	}
-	if result.Code != 200 || !strings.Contains(response.HTML, "<h1>") || !strings.Contains(response.HTML, "<table>") {
-		t.Fatalf("markdown rendering: %d %s", result.Code, response.HTML)
+	if response.Message == nil {
+		t.Fatal("stream response did not contain a message")
 	}
-	if strings.Contains(response.HTML, "<script>") || strings.Contains(response.HTML, `href="javascript:`) {
-		t.Fatalf("unsafe markdown: %s", response.HTML)
+	html := response.HTML
+	if result.Code != 200 || !strings.Contains(html, "<h1>") || !strings.Contains(html, "<table>") {
+		t.Fatalf("markdown rendering: %d %s", result.Code, html)
+	}
+	if strings.Contains(html, "<script>") || strings.Contains(html, `href="javascript:`) {
+		t.Fatalf("unsafe markdown: %s", html)
 	}
 }
 
@@ -240,13 +243,13 @@ type fakeWikiAgent struct {
 	history  [][]*schema.Message
 }
 
-func (a *fakeWikiAgent) Stream(ctx context.Context, question string, onText func(string) error) (*agent.Result, error) {
+func (a *fakeWikiAgent) Run(ctx context.Context, request agent.RunRequest) (*agent.Result, error) {
 	metadata := runcontext.From(ctx)
 	a.roots = append(a.roots, metadata.WikiRoot)
 	a.sessions = append(a.sessions, metadata.SessionID)
 	a.history = append(a.history, append([]*schema.Message(nil), metadata.History...))
-	result := &agent.Result{Answer: "回答：" + question}
-	return result, onText(result.Answer)
+	result := &agent.Result{Answer: "回答：" + request.Message}
+	return result, emitTestMessage(request, result.Answer)
 }
 func TestProjectSelectionAndRunContext(t *testing.T) {
 	fake := &fakeWikiAgent{}
@@ -479,11 +482,11 @@ type blockingWikiAgent struct {
 	release chan struct{}
 }
 
-func (a *blockingWikiAgent) Stream(_ context.Context, _ string, onText func(string) error) (*agent.Result, error) {
+func (a *blockingWikiAgent) Run(_ context.Context, request agent.RunRequest) (*agent.Result, error) {
 	a.entered <- struct{}{}
 	<-a.release
 	result := &agent.Result{Answer: "ok"}
-	return result, onText(result.Answer)
+	return result, emitTestMessage(request, result.Answer)
 }
 
 type cancelAwareAgent struct {
@@ -491,15 +494,128 @@ type cancelAwareAgent struct {
 	stopped chan struct{}
 }
 
-func (a *cancelAwareAgent) Stream(ctx context.Context, _ string, onText func(string) error) (*agent.Result, error) {
-	a.entered <- struct{}{}
-	_ = onText("working")
-	<-ctx.Done()
-	close(a.stopped)
-	return nil, ctx.Err()
+type revisionAwareAgent struct {
+	entered chan int
 }
 
-func TestPauseCancelsCurrentRunAndPersistsState(t *testing.T) {
+func (a *revisionAwareAgent) Run(ctx context.Context, request agent.RunRequest) (*agent.Result, error) {
+	if request.Message == "first" {
+		a.entered <- 1
+		<-ctx.Done()
+		// Deliberately try a late update: the server must not persist it after
+		// a newer intent revision was accepted.
+		_ = emitTestMessage(request, "stale output")
+		return &agent.Result{Answer: "stale output"}, nil
+	}
+	a.entered <- 2
+	if err := emitTestMessage(request, "fresh output"); err != nil {
+		return nil, err
+	}
+	return &agent.Result{Answer: "fresh output"}, nil
+}
+
+func TestAppendInterruptsOldRunAndRejectsLateOutput(t *testing.T) {
+	fake := &revisionAwareAgent{entered: make(chan int, 2)}
+	s := newTestServer(t, fake)
+	handler, root := s.Handler(), t.TempDir()
+	open := httptest.NewRequest("POST", "/api/project", strings.NewReader(fmt.Sprintf(`{"root":%q}`, root)))
+	open.Header.Set("Content-Type", "application/json")
+	open.Header.Set("X-Conversation-ID", "one")
+	if got := httptest.NewRecorder(); func() int { handler.ServeHTTP(got, open); return got.Code }() != 200 {
+		t.Fatal("open failed")
+	}
+	create := httptest.NewRequest("POST", "/api/sessions", nil)
+	create.Header.Set("X-Conversation-ID", "one")
+	created := httptest.NewRecorder()
+	handler.ServeHTTP(created, create)
+	var session sessionResponse
+	if err := json.Unmarshal(created.Body.Bytes(), &session); err != nil {
+		t.Fatal(err)
+	}
+	call := func(message string, done chan<- *httptest.ResponseRecorder) {
+		req := httptest.NewRequest("POST", "/api/chat/stream", strings.NewReader(fmt.Sprintf(`{"message":%q}`, message)))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Conversation-ID", "one")
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, req)
+		done <- recorder
+	}
+	firstDone, secondDone := make(chan *httptest.ResponseRecorder, 1), make(chan *httptest.ResponseRecorder, 1)
+	go call("first", firstDone)
+	select {
+	case got := <-fake.entered:
+		if got != 1 {
+			t.Fatalf("first run=%d", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("first did not start")
+	}
+	go call("add the new constraint", secondDone)
+	select {
+	case got := <-fake.entered:
+		if got != 2 {
+			t.Fatalf("second run=%d", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("second did not start")
+	}
+	select {
+	case <-firstDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("old request did not stop")
+	}
+	select {
+	case second := <-secondDone:
+		if !strings.Contains(second.Body.String(), "fresh output") {
+			t.Fatalf("new response: %s", second.Body.String())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("new request did not finish")
+	}
+	messages, err := s.sessions.LoadMessages(root, session.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, message := range messages {
+		if message.Role == "assistant" && message.Content == "stale output" {
+			t.Fatal("stale output persisted")
+		}
+	}
+	state, err := s.sessions.LoadSessionState(root, session.SessionID)
+	if err != nil || state.IntentRevision != 2 || state.CurrentVisibleAnswer != "fresh output" {
+		t.Fatalf("state=%+v err=%v", state, err)
+	}
+}
+
+func (a *cancelAwareAgent) Run(ctx context.Context, request agent.RunRequest) (*agent.Result, error) {
+	a.entered <- struct{}{}
+	_ = emitTestMessage(request, "working")
+	metadata := runcontext.From(ctx)
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			close(a.stopped)
+			return nil, ctx.Err()
+		case <-ticker.C:
+			paused, err := metadata.PauseRequested()
+			if err != nil {
+				return nil, err
+			}
+			if !paused {
+				continue
+			}
+			if err := metadata.CheckpointStore.Set(ctx, metadata.CheckpointID, []byte("checkpoint")); err != nil {
+				return nil, err
+			}
+			close(a.stopped)
+			return &agent.Result{Interrupt: &adk.InterruptInfo{}}, nil
+		}
+	}
+}
+
+func TestPauseInterruptsCurrentRunAndPersistsState(t *testing.T) {
 	fake := &cancelAwareAgent{entered: make(chan struct{}, 1), stopped: make(chan struct{})}
 	s := newTestServer(t, fake)
 	handler := s.Handler()
@@ -547,7 +663,7 @@ func TestPauseCancelsCurrentRunAndPersistsState(t *testing.T) {
 	select {
 	case <-fake.stopped:
 	case <-time.After(2 * time.Second):
-		t.Fatal("run was not canceled")
+		t.Fatal("run did not pause")
 	}
 	select {
 	case <-done:

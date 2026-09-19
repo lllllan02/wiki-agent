@@ -7,14 +7,19 @@ import (
 	"encoding/hex"
 	"time"
 
+	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/schema"
 )
 
 type Metadata struct {
-	SessionID string
-	WikiRoot  string
-	RunID     string
-	History   []*schema.Message
+	SessionID       string
+	WikiRoot        string
+	RunID           string
+	History         []*schema.Message
+	Resume          bool
+	CheckpointID    string
+	CheckpointStore adk.CheckPointStore
+	PauseRequested  func() (bool, error)
 }
 
 type metadataKey struct{}

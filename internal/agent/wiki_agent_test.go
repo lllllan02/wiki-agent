@@ -138,7 +138,12 @@ func TestAgentSearchReadAnswerWithMCP(t *testing.T) {
 	}
 	agents := []*agent.WikiAgent{a, secondAgent, a}
 	for i, runRoot := range []string{root, other, root} {
-		result, err := agents[i].Stream(runcontext.With(context.Background(), runcontext.Metadata{WikiRoot: runRoot, SessionID: "fixture"}), "缓存穿透如何处理？", func(string) error { return nil })
+		result, err := agents[i].Run(runcontext.With(context.Background(), runcontext.Metadata{WikiRoot: runRoot, SessionID: "fixture"}), agent.RunRequest{
+			Message: "缓存穿透如何处理？",
+			OnEvent: func(agent.StreamEvent) error {
+				return nil
+			},
+		})
 		if err != nil || result == nil || result.Answer == "" {
 			t.Fatalf("Agent MCP 闭环失败: %v", err)
 		}

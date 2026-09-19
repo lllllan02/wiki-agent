@@ -45,8 +45,40 @@ func TestAppendAndLoadMessages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if state.ReceivedCount != 2 || state.IntentRevision != 1 || state.RunStatus != RunStatusIdle || state.PauseStatus != PauseStatusNone {
+	if state.ReceivedCount != 0 || state.IntentRevision != 0 || state.RunStatus != RunStatusIdle || state.PauseStatus != PauseStatusNone {
 		t.Fatalf("state not updated from messages: %+v", state)
+	}
+}
+
+func TestReceiveAndAcceptUserMessageAreOrdered(t *testing.T) {
+	s := NewIn(t.TempDir())
+	root, sessionID := t.TempDir(), NewSessionID()
+	if err := s.CreateSession(root, sessionID); err != nil {
+		t.Fatal(err)
+	}
+	first, err := s.ReceiveUserMessage(root, Message{ID: NewMessageID(), SessionID: sessionID, Role: "user", Content: "first"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.ReceiveUserMessage(root, Message{ID: NewMessageID(), SessionID: sessionID, Role: "user", Content: "second"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.ReceivedSeq != 1 || second.ReceivedSeq != 2 {
+		t.Fatalf("sequences: %d %d", first.ReceivedSeq, second.ReceivedSeq)
+	}
+	if _, err := s.AcceptUserMessage(root, sessionID, second.ReceivedSeq, false); err == nil {
+		t.Fatal("accepted messages out of order")
+	}
+	if _, err := s.AcceptUserMessage(root, sessionID, first.ReceivedSeq, false); err != nil {
+		t.Fatal(err)
+	}
+	state, err := s.AcceptUserMessage(root, sessionID, second.ReceivedSeq, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.ReceivedCount != 2 || state.AcceptedThroughSeq != 2 || state.IntentRevision != 2 || state.EffectiveFromSeq != 2 {
+		t.Fatalf("state: %+v", state)
 	}
 }
 

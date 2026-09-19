@@ -1,15 +1,205 @@
-# Eino Checkpoint 与暂停恢复
+# Agent 的暂停与恢复：使用 Eino 与自行实现
 
-本项目使用 Eino ADK Runner 的 checkpoint 能力。`internal/agent/plugins/checkpoint` 是可选插件，只给 Runner 注册 CheckPointStore、checkpoint ID 和安全点取消，并在继续时调用 `Runner.Resume`。`WikiAgent` 仍负责 Wiki 输入、Eino 事件循环、流式输出和逐条消息处理。其他 Agent 可按相同方式注册插件，同时保留自己的执行逻辑。
+暂停与恢复需要回答三个问题：**在哪里停、保存什么、继续时从哪里开始。** CheckPoint（检查点）就是执行过程的一份可恢复快照，包含继续执行需要的上下文和位置，而不只是聊天记录。
 
-## 运行约定
+例如，Agent 正在执行“搜索资料 → 读取文件 → 生成回答”。如果在读取文件前暂停，恢复时应继续读取；如果文件已经读取完成，则应使用已保存的结果生成回答。把最初的问题再发给模型，是重新开始任务，不能等同于恢复。
 
-- 每个 Wiki 会话使用独立的 CheckPointID，Store 将 Eino 的检查点保存到本地文件。恢复时使用同一 ID 和 Store。
-- 主动暂停使用 `CancelAfterChatModel | CancelAfterToolCalls`，等待当前模型调用或工具调用到达安全点。超时会升级为即时取消。
-- 服务仅在确认检查点已落盘后标记为 `paused`。检查点缺失时显示失败，不宣称可以从断点继续。
-- 正常完成后删除旧检查点；新的一轮执行开始前也清理旧检查点，避免误用上一次执行状态。
-- `context.Canceled` 可能来自客户端断开或执行上下文结束，本身不证明存在可恢复检查点。
+暂停通常发生在模型或工具调用之间。正在执行的 HTTP 请求、goroutine 和远端操作不会被保存到文件里。`context.Cancel()` 只发出取消信号，也不会自动产生检查点。
 
-当前实现面向单机、只读任务的主动暂停。进程在模型或工具执行中途直接退出时，Eino 未必有可恢复的安全点；任务级持久执行恢复仍按 `dev.md` 的 L17 设计。
+## 一、使用 Eino：中间件触发中断，框架保存和恢复执行状态
 
-参考：[Eino ADK Agent Cancel and TurnLoop Quick Start](https://www.cloudwego.io/docs/eino/core_modules/eino_adk/agent_cancel_and_turnloop_quickstart/)、[Eino Human-in-the-Loop 技术文档](https://www.cloudwego.io/docs/eino/core_modules/eino_adk/agent_hitl/)。
+本项目参考 [官方第七章 Interrupt/Resume](https://www.cloudwego.io/zh/docs/eino/quick_start/chapter_07_interrupt_resume/)。官方示例通过工具审批触发中断，本项目通过用户的暂停请求触发中断；执行状态仍交给 Eino 管理，存储介质改为 JSONL 文件。
+
+### 1. 分清中间件、Runner 和存储的职责
+
+| 组件 | 负责什么 |
+| --- | --- |
+| 中断中间件 | 在模型、工具调用前检查暂停请求，返回 Eino 原生中断信号 |
+| Eino Runner | 调度 Agent，保存框架执行状态，从检查点恢复 |
+| CheckPointStore | 按检查点 ID 保存、读取框架交付的字节 |
+| 应用协调器 | 接收暂停／继续指令，维护会话状态，判断旧检查点是否仍适用 |
+
+Agent 注册中间件，并接入官方 Runner 的 `Run` / `Resume` 即可。工具本身不用实现暂停接口，也不需要项目再维护一套自定义 Runner 插件体系。
+
+### 2. 如何暂停：先记录意图，再在执行边界中断
+
+用户点击暂停后，应用先保存 `PauseStatus=requested`。中间件在下一次模型或工具调用前检查这个状态；如果需要暂停，就返回 `Interrupt` 或 `StatefulInterrupt`。
+
+下面是工具中间件包装后的核心逻辑，省略外层接口签名。`pauseRequested` 查询应用保存的暂停意图，`next` 是实际工具调用：
+
+```go
+func(ctx context.Context, args string, opts ...tool.Option) (string, error) {
+    if interrupted, hasState, saved := tool.GetInterruptState[string](ctx); interrupted && hasState {
+        args = saved
+    }
+    pause, err := pauseRequested(ctx)
+    if err != nil {
+        return "", err
+    }
+    if pause {
+        return "", tool.StatefulInterrupt(ctx, "等待继续", args)
+    }
+    return next(ctx, args, opts...)
+}
+```
+
+这里的 `args` 是中间件需要保存的局部状态。整个 Agent 的消息上下文、执行位置和其他框架状态由 Eino 保存，不需要中间件自行拼装。
+
+本项目同时包装普通工具、流式工具和模型调用，覆盖两个主要场景：
+
+- **模型生成期间收到暂停：** 当前调用结束后，如果还要执行工具，中间件在工具调用前中断。
+- **工具执行期间收到暂停：** 工具完成后，在下一次模型调用前中断。已完成工具的结果进入框架状态，恢复时无需重做这次工具调用。
+
+如果模型直接生成最终回答，本轮可能先完成，没有下一个中断边界。应用应承认任务已完成，不能只因为收到过暂停请求就声称存在可恢复进度。调用出错或超时同样不等于成功暂停。
+
+Runner 保存检查点后发出 `event.Action.Interrupted`。应用需将这个事件当作暂停结果，确认检查点存在后再标记 `paused`。工具错误包装器也必须放行原生中断信号，不能把它转换为普通的“工具执行失败”文本。
+
+### 3. 如何恢复：读取同一检查点，继续原执行
+
+以下接入片段对应本项目使用的 Eino API；`jsonlStore` 是实现了 `adk.CheckPointStore` 的文件存储：
+
+```go
+r := adk.NewRunner(ctx, adk.RunnerConfig{
+    Agent:           agent,
+    EnableStreaming: true,
+    CheckPointStore: jsonlStore,
+})
+
+// 首次执行：指定检查点 ID，供发生中断时使用。
+events := r.Run(ctx, messages, adk.WithCheckPointID(checkpointID))
+// 消费 events，分别处理消息、错误和 Action.Interrupted。
+
+// 收到继续指令、检查状态并清除暂停请求后：
+events, err := r.Resume(ctx, checkpointID)
+// 检查 err，再消费恢复执行产生的 events。
+```
+
+恢复时不需要重新传入用户问题，模型上下文从检查点还原。框架会重新进入中断位置，工具中间件通过 `GetInterruptState` 取回保存的参数。暂停请求若仍有效，就再次中断；否则继续调用工具。
+
+本项目的“继续”使用 `Resume` 恢复所有暂停点。若以后加入官方示例中的批准／拒绝流程，则需要 `ResumeWithParams`：用中断上下文的 ID 指定目标，在中间件中通过 `GetResumeContext` 读取审批结果；未被选中的中断点应保持中断。这属于另一种交互，不能把普通“继续”直接解释为任意敏感操作的授权。
+
+### 4. JSONL 保存的究竟是什么
+
+当前依赖版本的 `CheckPointStore` 使用 `Get` / `Set` 接口，传递的是 `[]byte`。序列化格式由 Eino 决定，本项目不解释或重写这些字节。
+
+每个检查点对应 `.wiki-agent/checkpoints/<checkpointID>.jsonl`，每次保存追加一行：
+
+```json
+{"data":"<Eino 检查点字节的 base64 编码>"}
+```
+
+`[]byte` 经 Go 的 JSON 编码自动转为 base64，读取时还原成原始字节。它是 JSONL 格式的检查点记录，不是可直接编辑的模型消息 JSON。
+
+当前实现的读写规则是：
+
+- `Set` 追加完整记录并调用 `Sync`；`Get` 返回最后一条完整记录，支持超过 64 KiB 的单行。
+- 末尾没有换行的半条记录视为未完成写入，读取时忽略，下次追加前清除；完整但无法解析的记录会报错。
+- 同一个 Store 实例通过互斥锁串行访问。这个锁不提供多进程写入协调能力。
+- 正常完成、取消或检查点失效后清理文件。旧 `.bin` 格式不再读取，旧格式暂停任务需要重新发起。
+
+文件存储使检查点能跨进程重启保留，但不表示任意时刻崩溃都能恢复。本项目主要在原生中断时保存检查点，也没有把检查点文件与会话状态文件放入一个跨文件事务。若进程恰好在两次写入之间退出，仍需核对状态，不能仅凭文件存在自动恢复。框架版本或 Agent 结构变化后的旧快照兼容性，也需要单独验证。
+
+### 5. 框架之外，应用仍要判断“能不能继续”
+
+例如，用户暂停后又追加“只看最近一年的资料”。旧检查点里的模型计划可能已经过时，直接恢复会继续执行旧要求。
+
+本项目用任务意图修订号 `intentRevision` 和已接纳消息位置 `acceptedThrough` 判断检查点是否匹配。匹配时恢复；不匹配时废弃旧执行状态，从已接纳的消息重建输入。运行标识和修订号还用于拒绝旧运行迟到的可见输出。
+
+流式文本只代表已经展示的内容，不是执行检查点。前端已经收到一段回答，也不能据此推断模型或工具步骤已经完整保存。
+
+对应实现：
+
+- [中断中间件](../internal/agent/middleware/interrupt.go)
+- [Agent 接入](../internal/agent/wiki_agent.go)与[事件消费](../internal/agent/events.go)
+- [JSONL 检查点存储](../internal/store/checkpoint.go)
+- [会话协调与恢复检查](../internal/web/server.go)
+
+## 二、不使用框架：难点在执行状态与一致性
+
+不用框架也能实现暂停恢复，但需要自行建立可恢复的执行状态机。难点不在于写一个 JSON 文件，而在于保证文件准确描述了实际执行进度，尤其是进程退出、远端请求超时和用户改变要求时。
+
+### 1. 必须明确“下一步是什么”
+
+仅保存聊天记录不足以区分“模型决定调用工具”“工具正在执行”和“工具已经完成”。执行快照至少需要描述：
+
+| 状态 | 用途 |
+| --- | --- |
+| 会话 ID、运行 ID、任务修订号 | 确定快照归属，识别过时执行 |
+| 已接纳消息位置、模型输入 | 重建一致的上下文，避免遗漏或重复接纳消息 |
+| 当前阶段、下一步 | 确定恢复后调用模型还是工具 |
+| 工具调用 ID、名称、参数、结果 | 保持模型与工具消息关联，复用已完成结果 |
+| 暂停意图、操作状态 | 区分请求暂停、已暂停和结果未知 |
+
+需要持久化的是业务数据和执行阶段，不是 HTTP 连接、取消函数或正在运行的 goroutine。新进程负责重建客户端和执行器，再按照快照继续。
+
+### 2. 暂停、保存进度与推进步骤必须协调
+
+一个会话需要有唯一的执行协调者。HTTP 接口只持久化指令并唤醒它，不能每收到一次“继续”就启动一个新的执行循环。
+
+下面是设计伪代码。`claimNextStep` 表示在同一事务或锁保护下检查暂停意图、领取执行权；不是先检查一次状态，再不受保护地启动步骤：
+
+```text
+requestPause(session):
+    persist pauseRequested = true
+    wake coordinator
+
+coordinator(session):
+    loop:
+        step = claimNextStep(session)
+        # 若已请求暂停：在已提交边界保存快照、标记 paused，不领取新步骤。
+        if step is paused or finished: return
+
+        outcome = execute(step, timeout)
+        commitOutcome(step.id, outcome)
+        # 保存结果与 nextStep；失败或结果未知进入对应分支，不能当作成功推进。
+```
+
+若暂停请求发生在步骤领取之后，该步骤属于已经开始的工作。可以等待它完成，再保存结果并暂停。若选择取消正在执行的请求，就必须另外判断是否留下未知结果。
+
+工具结果和“下一步位置”最好在一次事务中提交，否则会出现“结果已保存但位置没推进”，导致恢复后重复执行；反过来则可能跳过尚未保存的结果。使用 JSONL 时，应把恢复所需的一致状态放在同一条提交记录中，并处理半行、落盘失败和重复记录；多文件写入本身不具有事务性。
+
+### 3. 最难的窗口：外部操作成功，本地还没记录
+
+以“发送邮件”为例：远端已经发送成功，但服务在保存结果前崩溃。重启后，本地只看到 `pending`，无法直接判断这封邮件是否已经发送。盲目重试可能重复发送，直接跳过又可能漏发。
+
+通常需要先记录稳定的操作 ID，再调用远端；恢复时使用同一个 ID 查询或重试：
+
+```text
+persist operation(id, status=pending, arguments)
+result = remote.execute(arguments, idempotencyKey=id)
+persist operation(id, status=completed, result) + nextStep
+
+# 恢复时发现 pending：
+# 支持幂等键或结果查询 → 按同一个 id 核对、补记或重试。
+# 无法核对且不能安全重试 → 标记 result_unknown，等待人工处理。
+```
+
+本地写入再可靠，也不能单独保证远端操作“恰好执行一次”。`context.Canceled`、连接断开或超时只说明调用方停止等待，不证明远端没有产生副作用。Eino 的检查点也不会自动消除这个问题。
+
+### 4. 新要求与迟到结果不能混入旧快照
+
+用户追加要求、替换目标或取消任务后，旧模型请求仍可能返回。恢复器和结果提交端都需要检查运行 ID、修订号与消息位置，而不只是在启动时检查一次。
+
+新的目标应先持久化，再使旧执行失效。旧回答不能覆盖新回答，旧计划不能继续领取新步骤。已经发生的工具操作则仍是事实，应记录其结果，尤其不能因为修订号过时就遗忘已产生的写入。
+
+单进程可用每会话队列与锁协调；多进程还需要租约、条件更新或 fencing token，阻止失去执行权的旧实例继续提交。进程重启后的“继续”也必须先取得执行权。
+
+### 5. 恢复不是无条件重放
+
+恢复前需要核对快照版本、会话归属、当前任务意图和未完成操作。输入文件已经变化时，旧工具结果是否仍可用，也要由业务决定。
+
+执行预算同样需要明确：暂停时长通常不计入执行时间，但已经消耗的步骤、token、绝对截止时间和授权有效期不能因为重启自动重置。这些是完整持久执行系统需要补齐的能力，并非当前项目都已实现。
+
+最有价值的验证方式是在关键窗口模拟故障：工具执行前退出、工具成功后落盘前退出、写入半行、重复点击继续，以及新要求接纳后旧结果才返回。检查的目标是消息没有丢失、已完成步骤没有被误重做、未知副作用没有被假定成功，以及同一任务只有一个有效执行者。
+
+## 两种方式的工作边界
+
+| 问题 | 使用 Eino | 不使用框架 |
+| --- | --- | --- |
+| 保存执行位置与上下文 | 框架负责，中间件提供局部状态 | 自行定义并持久化状态机 |
+| 从中断位置继续 | `Runner.Resume` | 根据 `phase` / `nextStep` 分派执行 |
+| 持久化介质 | 实现 CheckPointStore，本项目采用 JSONL | 自行实现日志或数据库存储 |
+| 暂停意图、会话并发、新旧任务隔离 | 应用负责 | 应用负责 |
+| 外部副作用、幂等、结果核对 | 应用负责 | 应用负责 |
+
+框架减少了执行状态机与序列化的工作量。恢复是否符合用户当前意图、外部操作能否安全继续，仍然需要应用作出判断。

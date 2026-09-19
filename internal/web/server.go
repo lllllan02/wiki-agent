@@ -16,7 +16,6 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/schema"
 	"github.com/gin-gonic/gin"
 	"github.com/lllllan02/wiki-agent/internal/agent"
@@ -30,17 +29,13 @@ import (
 var staticFiles embed.FS
 
 type WikiAgent interface {
-	Stream(context.Context, string, func(string) error) (*agent.Result, error)
-}
-
-type checkPointWikiAgent interface {
-	StreamWithCheckPoint(context.Context, string, string, adk.CheckPointStore, func(string) error, agent.CancelRegistrar) (*agent.Result, error)
-	ResumeWithCheckPoint(context.Context, string, adk.CheckPointStore, func(string) error, agent.CancelRegistrar) (*agent.Result, error)
+	Run(context.Context, agent.RunRequest) (*agent.Result, error)
 }
 type Server struct {
 	agent         WikiAgent
 	mu            sync.Mutex
 	conversations map[string]*conversationState
+	executions    map[string]*conversationState
 	pickDirectory func(context.Context) (string, error)
 	sessions      *store.Store
 }
@@ -49,18 +44,18 @@ type conversationState struct {
 	root         string
 	sessionID    string
 	inbox        chan *chatJob
-	currentPause func() error
 	currentAbort context.CancelFunc
 	currentRun   int64
 }
 type chatJob struct {
-	ctx     context.Context
-	root    string
-	session string
-	message string
-	intent  messageIntent
-	onText  func(string) error
-	done    chan chatResult
+	ctx         context.Context
+	root        string
+	session     string
+	message     string
+	receivedSeq int
+	intent      messageIntent
+	onEvent     agent.EventReporter
+	done        chan chatResult
 }
 type chatResult struct {
 	result *agent.Result
@@ -68,7 +63,7 @@ type chatResult struct {
 }
 
 func New(wikiAgent WikiAgent) *Server {
-	return &Server{agent: wikiAgent, conversations: make(map[string]*conversationState), pickDirectory: systemDirectoryPicker, sessions: store.New()}
+	return &Server{agent: wikiAgent, conversations: make(map[string]*conversationState), executions: make(map[string]*conversationState), pickDirectory: systemDirectoryPicker, sessions: store.New()}
 }
 func (s *Server) Handler() *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
@@ -358,9 +353,11 @@ func (s *Server) currentRoot(c *gin.Context) (string, bool) {
 }
 
 type streamEvent struct {
-	Type  string `json:"type"`
-	HTML  string `json:"html,omitempty"`
-	Error string `json:"error,omitempty"`
+	HTML    string          `json:"html,omitempty"`
+	Type    string          `json:"type"`
+	Content string          `json:"content,omitempty"`
+	Message *schema.Message `json:"message,omitempty"`
+	Error   string          `json:"error,omitempty"`
 }
 
 type messageIntent int
@@ -395,59 +392,90 @@ func (s *Server) streamChat(c *gin.Context) {
 		c.JSON(400, chatResponse{Error: "请先打开知识库目录"})
 		return
 	}
+	execution := s.executionState(root, sessionID)
 	c.Header("Content-Type", "application/x-ndjson; charset=utf-8")
 	c.Header("Cache-Control", "no-cache, no-transform")
 	c.Header("X-Accel-Buffering", "no")
 	c.Status(200)
 	// 每个事件占一行 JSON。Flush 让浏览器在本轮 Agent 结束前也能收到 update。
 	write := func(event streamEvent) error {
+		text := event.Content
+		if event.Message != nil && event.Message.Role == schema.Assistant {
+			text = event.Message.Content
+		}
+		if text != "" {
+			var err error
+			event.HTML, err = renderMarkdown(text)
+			if err != nil {
+				return err
+			}
+		}
 		if err := json.NewEncoder(c.Writer).Encode(event); err != nil {
 			return err
 		}
 		c.Writer.Flush()
 		return nil
 	}
-	// onText 是传给 Agent.Stream 的回调。answer 是当前助手消息截至
-	// 这一段的完整 Markdown，而不是单个 token；每次都重绘同一个回答区域。
-	onText := func(answer string) error {
-		html, err := renderMarkdown(answer)
+	onEvent := func(event agent.StreamEvent) error {
+		return write(streamEvent{Type: "message", Message: event.Message})
+	}
+	intent := classifyIntent(req.Message)
+	if req.Resume {
+		intent = intentResumeRun
+	}
+	if intent == intentStatus {
+		state, err := s.sessions.LoadSessionState(root, sessionID)
 		if err != nil {
-			return err
+			_ = write(streamEvent{Type: "error", Error: friendlyError(err)})
+			return
 		}
-		return write(streamEvent{Type: "update", HTML: html})
+		answer := "当前状态：" + string(state.RunStatus) + "，暂停状态：" + string(state.PauseStatus)
+		_ = write(streamEvent{Type: "done", Content: answer})
+		return
 	}
 	job := &chatJob{
 		ctx:     c.Request.Context(),
 		root:    root,
 		session: sessionID,
 		message: strings.TrimSpace(req.Message),
-		intent:  classifyIntent(req.Message),
-		onText:  onText,
+		intent:  intent,
+		onEvent: onEvent,
 		done:    make(chan chatResult, 1),
 	}
-	if req.Resume {
-		job.intent = intentResumeRun
+	if !req.Resume && (job.intent == intentAppend || job.intent == intentReplace) {
+		received, err := s.sessions.ReceiveUserMessage(root, store.Message{ID: store.NewMessageID(), SessionID: sessionID, Role: "user", Content: job.message})
+		if err != nil {
+			_ = write(streamEvent{Type: "error", Error: friendlyError(err)})
+			return
+		}
+		job.receivedSeq = received.ReceivedSeq
+		// The incoming instruction is accepted before cancelling the old run,
+		// so every old callback immediately becomes revision-stale.
+		if _, err := s.sessions.AcceptUserMessage(root, sessionID, received.ReceivedSeq, job.intent == intentReplace); err != nil {
+			_ = write(streamEvent{Type: "error", Error: friendlyError(err)})
+			return
+		}
+		execution.mu.Lock()
+		abort := execution.currentAbort
+		execution.mu.Unlock()
+		if abort != nil {
+			abort()
+		}
 	}
 	if job.intent == intentPause || job.intent == intentCancel {
-		state.mu.Lock()
-		pause := state.currentPause
-		abort := state.currentAbort
-		state.mu.Unlock()
+		execution.mu.Lock()
+		abort := execution.currentAbort
+		execution.mu.Unlock()
 		if err := s.applyImmediateControl(root, sessionID, job.intent); err != nil {
 			_ = write(streamEvent{Type: "error", Error: friendlyError(err)})
 			return
 		}
-		if pause != nil {
-			if err := pause(); err != nil && !errors.Is(err, adk.ErrCancelTimeout) {
-				_ = write(streamEvent{Type: "error", Error: friendlyError(err)})
-				return
-			}
-		} else if abort != nil && (job.intent == intentCancel || s.agentDoesNotCheckpoint()) {
+		if job.intent == intentCancel && abort != nil {
 			abort()
 		}
 	}
 	select {
-	case state.inbox <- job:
+	case execution.inbox <- job:
 	case <-c.Request.Context().Done():
 		return
 	}
@@ -460,12 +488,7 @@ func (s *Server) streamChat(c *gin.Context) {
 		return
 	}
 	// 只有 EINO 事件迭代结束、Agent 返回最终 Result 后，才发送 done。
-	html, err := renderMarkdown(result.Answer)
-	if err != nil {
-		_ = write(streamEvent{Type: "error", Error: "回答渲染失败"})
-		return
-	}
-	_ = write(streamEvent{Type: "done", HTML: html})
+	_ = write(streamEvent{Type: "done", Content: result.Answer})
 }
 
 func (s *Server) pauseChat(c *gin.Context) {
@@ -490,30 +513,27 @@ func (s *Server) controlChat(c *gin.Context, intent messageIntent) {
 	state.mu.Lock()
 	root := state.root
 	sessionID := state.sessionID
-	pause := state.currentPause
-	abort := state.currentAbort
 	state.mu.Unlock()
 	if root == "" || sessionID == "" {
 		c.JSON(400, controlResponse{Error: "请先打开知识库目录"})
 		return
 	}
+	execution := s.executionState(root, sessionID)
+	execution.mu.Lock()
+	abort := execution.currentAbort
+	execution.mu.Unlock()
 	if intent == intentPause || intent == intentCancel {
 		if err := s.applyImmediateControl(root, sessionID, intent); err != nil {
 			c.JSON(500, controlResponse{Error: friendlyError(err)})
 			return
 		}
-		if pause != nil {
-			if err := pause(); err != nil && !errors.Is(err, adk.ErrCancelTimeout) {
-				c.JSON(500, controlResponse{Error: friendlyError(err)})
-				return
-			}
-		} else if abort != nil && (intent == intentCancel || s.agentDoesNotCheckpoint()) {
+		if intent == intentCancel && abort != nil {
 			abort()
 		}
 	}
 	job := &chatJob{ctx: c.Request.Context(), root: root, session: sessionID, message: intent.String(), intent: intent, done: make(chan chatResult, 1)}
 	select {
-	case state.inbox <- job:
+	case execution.inbox <- job:
 	case <-c.Request.Context().Done():
 		return
 	}
@@ -553,8 +573,22 @@ func (s *Server) state(id string) *conversationState {
 	defer s.mu.Unlock()
 	state := s.conversations[id]
 	if state == nil {
-		state = &conversationState{inbox: make(chan *chatJob, 16)}
+		state = &conversationState{}
 		s.conversations[id] = state
+	}
+	return state
+}
+
+// executionState is keyed by the durable session identity, not the browser
+// window. Selecting one session in two windows must still produce one loop.
+func (s *Server) executionState(root, sessionID string) *conversationState {
+	key := store.NodeID(root) + ":" + sessionID
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state := s.executions[key]
+	if state == nil {
+		state = &conversationState{root: root, sessionID: sessionID, inbox: make(chan *chatJob, 16)}
+		s.executions[key] = state
 		go s.runConversation(state)
 	}
 	return state
@@ -571,61 +605,70 @@ func (s *Server) runConversation(state *conversationState) {
 			continue
 		}
 		resume := job.intent == intentResumeRun
-		cpAgent, checkpointID := s.checkPointRunner(job.root, job.session)
-		if cpAgent != nil {
-			if resume {
-				if _, exists, err := s.sessions.Get(job.ctx, checkpointID); err != nil {
-					job.done <- chatResult{err: err}
-					continue
-				} else if !exists {
-					job.done <- chatResult{err: fmt.Errorf("未找到可恢复的 checkpoint")}
+		checkpointID := s.sessions.CheckPointID(job.root, job.session)
+		sessionState, err := s.sessions.LoadSessionState(job.root, job.session)
+		if err != nil {
+			job.done <- chatResult{err: err}
+			continue
+		}
+		if resume {
+			if _, exists, err := s.sessions.Get(job.ctx, checkpointID); err != nil {
+				job.done <- chatResult{err: err}
+				continue
+			} else if !exists {
+				job.done <- chatResult{err: fmt.Errorf("未找到可恢复的 checkpoint")}
+				continue
+			}
+			if sessionState.CheckpointRevision != sessionState.IntentRevision || sessionState.CheckpointAccepted != sessionState.AcceptedThroughSeq {
+				_ = s.sessions.Delete(context.Background(), checkpointID)
+				// The opaque checkpoint contains the old model context. Rebuild a
+				// fresh run from the durable accepted messages instead of resuming it.
+				messages, loadErr := s.sessions.LoadMessages(job.root, job.session)
+				if loadErr != nil {
+					job.done <- chatResult{err: loadErr}
 					continue
 				}
-			} else {
-				state, err := s.sessions.LoadSessionState(job.root, job.session)
-				if err != nil {
-					job.done <- chatResult{err: err}
-					continue
+				for i := len(messages) - 1; i >= 0; i-- {
+					if messages[i].Role == "user" && messages[i].ReceivedSeq == sessionState.AcceptedThroughSeq {
+						job.message, job.receivedSeq, resume = messages[i].Content, messages[i].ReceivedSeq, false
+						break
+					}
 				}
-				if state.RunStatus == store.RunStatusPaused || state.PauseStatus == store.PauseStatusRequested {
-					job.done <- chatResult{err: fmt.Errorf("任务已暂停，请先继续或取消")}
-					continue
-				}
-				if err := s.sessions.Delete(job.ctx, checkpointID); err != nil {
-					job.done <- chatResult{err: err}
+				if resume {
+					job.done <- chatResult{err: fmt.Errorf("找不到可重建的已接纳任务")}
 					continue
 				}
 			}
-		}
-		if job.intent == intentReplace {
-			if err := s.sessions.UpdateSessionState(job.root, job.session, func(sessionState *store.SessionState) {
-				sessionState.IntentRevision++
-			}); err != nil {
+		} else {
+			state, err := s.sessions.LoadSessionState(job.root, job.session)
+			if err != nil {
+				job.done <- chatResult{err: err}
+				continue
+			}
+			if state.RunStatus == store.RunStatusPaused || state.PauseStatus == store.PauseStatusRequested {
+				job.done <- chatResult{err: fmt.Errorf("任务已暂停，请先继续或取消")}
+				continue
+			}
+			if err := s.sessions.Delete(job.ctx, checkpointID); err != nil {
 				job.done <- chatResult{err: err}
 				continue
 			}
 		}
 		var history []*schema.Message
 		if !resume {
-			var err error
-			history, err = s.sessions.LoadAgentHistory(job.root, job.session)
-			if err != nil {
-				job.done <- chatResult{err: err}
+			if job.receivedSeq == 0 {
+				job.done <- chatResult{err: fmt.Errorf("缺少已接收的用户消息")}
 				continue
 			}
-			if err := s.sessions.AppendMessage(job.root, store.Message{
-				ID:        store.NewMessageID(),
-				SessionID: job.session,
-				Role:      "user",
-				Content:   job.message,
-			}); err != nil {
+			history, err = s.sessions.LoadExecutionHistory(job.root, job.session, job.receivedSeq, sessionState.EffectiveFromSeq)
+			if err != nil {
 				job.done <- chatResult{err: err}
 				continue
 			}
 		}
 		skipCanceled := false
 		if err := s.sessions.UpdateSessionState(job.root, job.session, func(sessionState *store.SessionState) {
-			sessionState.AcceptedCount = sessionState.ReceivedCount
+			sessionState.AcceptedCount = sessionState.AcceptedThroughSeq
 			if sessionState.RunStatus == store.RunStatusCanceled {
 				skipCanceled = true
 				return
@@ -647,59 +690,98 @@ func (s *Server) runConversation(state *conversationState) {
 		state.mu.Lock()
 		state.currentRun++
 		runID := state.currentRun
-		state.currentPause = nil
 		state.currentAbort = abort
 		state.mu.Unlock()
-		ctx = runcontext.With(ctx, runcontext.Metadata{SessionID: job.session, WikiRoot: job.root, History: history})
-		onText := job.onText
-		if onText != nil {
-			onText = func(answer string) error {
-				if err := s.sessions.UpdateSessionState(job.root, job.session, func(sessionState *store.SessionState) {
-					sessionState.CurrentVisibleAnswer = answer
-				}); err != nil {
-					return err
+		revision := sessionState.IntentRevision
+		if err := s.sessions.UpdateSessionState(job.root, job.session, func(sessionState *store.SessionState) {
+			sessionState.ActiveRunID = runID
+			sessionState.ActiveIntentRevision = revision
+		}); err != nil {
+			abort()
+			job.done <- chatResult{err: err}
+			continue
+		}
+		onEvent := job.onEvent
+		if onEvent != nil {
+			onEvent = func(event agent.StreamEvent) error {
+				if event.Message != nil && event.Message.Content != "" {
+					current, err := s.sessions.UpdateVisibleAnswerIfCurrent(job.root, job.session, runID, revision, event.Message.Content)
+					if err != nil {
+						return err
+					}
+					if !current {
+						return context.Canceled
+					}
 				}
-				return job.onText(answer)
+				return job.onEvent(event)
 			}
 		}
-		registerCancel := func(pause func() error) {
-			state.mu.Lock()
-			if state.currentRun == runID {
-				state.currentPause = pause
-			}
-			state.mu.Unlock()
-			storedState, err := s.sessions.LoadSessionState(job.root, job.session)
-			if err == nil && storedState.PauseStatus == store.PauseStatusRequested {
-				go func() { _ = pause() }()
-			}
-		}
+		ctx = runcontext.With(ctx, runcontext.Metadata{
+			SessionID:       job.session,
+			WikiRoot:        job.root,
+			History:         history,
+			Resume:          resume,
+			CheckpointID:    checkpointID,
+			CheckpointStore: s.sessions,
+			PauseRequested: func() (bool, error) {
+				state, err := s.sessions.LoadSessionState(job.root, job.session)
+				return state.PauseStatus == store.PauseStatusRequested, err
+			},
+		})
 		var result *agent.Result
-		var err error
-		if cpAgent != nil {
-			if resume {
-				result, err = cpAgent.ResumeWithCheckPoint(ctx, checkpointID, s.sessions, onText, registerCancel)
-			} else {
-				result, err = cpAgent.StreamWithCheckPoint(ctx, job.message, checkpointID, s.sessions, onText, registerCancel)
-			}
-		} else {
-			result, err = s.agent.Stream(ctx, job.message, onText)
+		err = nil
+		runRequest := agent.RunRequest{
+			Message: job.message,
+			OnEvent: onEvent,
 		}
+		result, err = s.agent.Run(ctx, runRequest)
 		state.mu.Lock()
 		if state.currentRun == runID {
-			state.currentPause = nil
 			state.currentAbort = nil
 		}
 		state.mu.Unlock()
 		abort()
-		if isPauseError(err) {
+		storedState, stateErr := s.sessions.LoadSessionState(job.root, job.session)
+		if stateErr != nil {
+			job.done <- chatResult{err: stateErr}
+			continue
+		}
+		// An append/replace accepted while this call was running invalidates all
+		// of its output, including a late successful result.
+		if storedState.IntentRevision != revision {
+			_ = s.sessions.Delete(context.Background(), checkpointID)
+			_ = s.sessions.UpdateSessionState(job.root, job.session, func(sessionState *store.SessionState) {
+				if sessionState.ActiveRunID == runID {
+					sessionState.ActiveRunID = 0
+					sessionState.ActiveIntentRevision = 0
+					sessionState.RunStatus = store.RunStatusIdle
+				}
+			})
+			job.done <- chatResult{err: fmt.Errorf("任务已根据新要求重新规划")}
+			continue
+		}
+		// Native tool/agent interrupts are successful suspensions, not empty
+		// answers. Persist the same paused state as a user-requested pause.
+		interrupted := err == nil && result != nil && result.Interrupt != nil
+		if interrupted && storedState.RunStatus != store.RunStatusCanceled {
+			if err := s.applyImmediateControl(job.root, job.session, intentPause); err != nil {
+				job.done <- chatResult{err: err}
+				continue
+			}
+		}
+		if interrupted || (errors.Is(err, context.Canceled) && storedState.RunStatus == store.RunStatusCanceled) {
 			storedState, stateErr := s.sessions.LoadSessionState(job.root, job.session)
 			if stateErr != nil {
 				job.done <- chatResult{err: stateErr}
 				continue
 			}
 			if storedState.PauseStatus == store.PauseStatusRequested || storedState.RunStatus == store.RunStatusCanceled {
-				stopErr := s.markStoppedAfterCancel(job.root, job.session, cpAgent != nil, checkpointID)
-				job.done <- chatResult{result: &agent.Result{Answer: "已暂停。"}, err: stopErr}
+				stopErr := s.markStopped(job.root, job.session, checkpointID)
+				answer := "已暂停。"
+				if storedState.RunStatus == store.RunStatusCanceled {
+					answer = "已取消。"
+				}
+				job.done <- chatResult{result: &agent.Result{Answer: answer}, err: stopErr}
 				continue
 			}
 		}
@@ -715,9 +797,13 @@ func (s *Server) runConversation(state *conversationState) {
 		if err != nil {
 			status = store.RunStatusFailed
 		}
-		stateErr := s.sessions.UpdateSessionState(job.root, job.session, func(sessionState *store.SessionState) {
+		stateErr = s.sessions.UpdateSessionState(job.root, job.session, func(sessionState *store.SessionState) {
 			sessionState.RunStatus = status
 			sessionState.PauseStatus = store.PauseStatusNone
+			if sessionState.ActiveRunID == runID {
+				sessionState.ActiveRunID = 0
+				sessionState.ActiveIntentRevision = 0
+			}
 			if result != nil {
 				sessionState.CurrentVisibleAnswer = result.Answer
 			}
@@ -725,7 +811,7 @@ func (s *Server) runConversation(state *conversationState) {
 		if err == nil {
 			err = stateErr
 		}
-		if err == nil && cpAgent != nil {
+		if err == nil {
 			err = s.sessions.Delete(context.Background(), checkpointID)
 		}
 		job.done <- chatResult{result: result, err: err}
@@ -744,38 +830,18 @@ func (s *Server) applyImmediateControl(root, sessionID string, intent messageInt
 	})
 }
 
-func (s *Server) checkPointRunner(root, sessionID string) (checkPointWikiAgent, string) {
-	cpAgent, ok := s.agent.(checkPointWikiAgent)
-	if !ok {
-		return nil, ""
-	}
-	return cpAgent, s.sessions.CheckPointID(root, sessionID)
-}
-
-func (s *Server) agentDoesNotCheckpoint() bool {
-	_, ok := s.agent.(checkPointWikiAgent)
-	return !ok
-}
-
-func isPauseError(err error) bool {
-	if err == nil {
-		return false
-	}
-	if errors.Is(err, context.Canceled) {
-		return true
-	}
-	var cancelErr *adk.CancelError
-	return errors.As(err, &cancelErr)
-}
-
 func (s *Server) applyControl(root, sessionID string, intent messageIntent) error {
+	if intent == intentCancel {
+		if err := s.sessions.Delete(context.Background(), s.sessions.CheckPointID(root, sessionID)); err != nil {
+			return err
+		}
+	}
 	if intent == intentPause {
-		if cpAgent, checkpointID := s.checkPointRunner(root, sessionID); cpAgent != nil {
-			if _, exists, err := s.sessions.Get(context.Background(), checkpointID); err != nil {
-				return err
-			} else if !exists {
-				return fmt.Errorf("任务未在可恢复的检查点暂停")
-			}
+		checkpointID := s.sessions.CheckPointID(root, sessionID)
+		if _, exists, err := s.sessions.Get(context.Background(), checkpointID); err != nil {
+			return err
+		} else if !exists {
+			return fmt.Errorf("任务未在可恢复的检查点暂停")
 		}
 	}
 	return s.sessions.UpdateSessionState(root, sessionID, func(sessionState *store.SessionState) {
@@ -795,19 +861,21 @@ func (s *Server) applyControl(root, sessionID string, intent messageIntent) erro
 	})
 }
 
-func (s *Server) markStoppedAfterCancel(root, sessionID string, checkpointEnabled bool, checkpointID string) error {
+func (s *Server) markStopped(root, sessionID string, checkpointID string) error {
 	state, err := s.sessions.LoadSessionState(root, sessionID)
 	if err != nil {
 		return err
 	}
 	resumable := true
-	if checkpointEnabled && state.PauseStatus == store.PauseStatusRequested {
+	if state.PauseStatus == store.PauseStatusRequested {
 		_, resumable, err = s.sessions.Get(context.Background(), checkpointID)
 		if err != nil {
 			return err
 		}
 	}
 	err = s.sessions.UpdateSessionState(root, sessionID, func(sessionState *store.SessionState) {
+		sessionState.ActiveRunID = 0
+		sessionState.ActiveIntentRevision = 0
 		if sessionState.PauseStatus == store.PauseStatusRequested {
 			if !resumable {
 				sessionState.RunStatus = store.RunStatusFailed
@@ -816,10 +884,14 @@ func (s *Server) markStoppedAfterCancel(root, sessionID string, checkpointEnable
 			}
 			sessionState.RunStatus = store.RunStatusPaused
 			sessionState.PauseStatus = store.PauseStatusPaused
+			sessionState.CheckpointRevision = sessionState.IntentRevision
+			sessionState.CheckpointAccepted = sessionState.AcceptedThroughSeq
 			return
 		}
 		if sessionState.RunStatus == store.RunStatusCanceled {
 			sessionState.PauseStatus = store.PauseStatusNone
+			sessionState.ActiveRunID = 0
+			sessionState.ActiveIntentRevision = 0
 			return
 		}
 		sessionState.RunStatus = store.RunStatusIdle
@@ -840,8 +912,8 @@ func (s *Server) answerStatus(job *chatJob) {
 		return
 	}
 	answer := "当前状态：" + string(state.RunStatus) + "，暂停状态：" + string(state.PauseStatus)
-	if job.onText != nil {
-		_ = job.onText(answer)
+	if job.onEvent != nil {
+		_ = job.onEvent(agent.StreamEvent{Message: schema.AssistantMessage(answer, nil)})
 	}
 	job.done <- chatResult{result: &agent.Result{Answer: answer}}
 }
