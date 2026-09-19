@@ -67,8 +67,9 @@ func Load(path string) (Config, error) {
 	if err := v.ReadInConfig(); err != nil {
 		return Config{}, fmt.Errorf("读取 YAML 配置失败: %w", err)
 	}
-	// 严格解码能发现 max_step 等拼写错误；不要让配置看似生效但实际被忽略。
-	if err := v.UnmarshalExact(&cfg); err != nil {
+	// 配置文件需要兼容旧版本字段：未知字段直接忽略，已声明字段仍保留类型解析。
+	// 新增字段通过 default 标签补齐，因此旧配置可以继续启动。
+	if err := v.Unmarshal(&cfg); err != nil {
 		return Config{}, fmt.Errorf("解析配置失败: %w", err)
 	}
 	cfg.Model.BaseURL = strings.TrimRight(strings.TrimSpace(cfg.Model.BaseURL), "/")

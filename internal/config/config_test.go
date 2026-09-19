@@ -52,14 +52,27 @@ func TestLoadYAML(t *testing.T) {
 	}
 }
 
-// 文件缺失、键名拼错和无法解析的值必须明确报错，方便在网页启动前修复配置。
+// 旧字段和未知字段不影响启动；新增字段依靠 default 标签补齐，旧配置也能继续运行。
+func TestLoadIgnoresUnknownFields(t *testing.T) {
+	path := yamlFile(t, "model:\n  api_key: test-key\n  name: yaml-model\nagent:\n  maxBytes: 1024\n  max_step: 2\nwiki:\n  root: wiki\nmcp:\n  registry_file: mcp.yaml\n")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Agent.MaxSteps != 8 || cfg.Model.Timeout != time.Minute || cfg.MCP.Timeout != 30*time.Second {
+		t.Fatalf("未知字段应忽略，缺省字段应使用默认值: %+v", cfg)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// 文件缺失和无法解析的值必须明确报错，方便在网页启动前修复配置。
 func TestLoadFilesAndErrors(t *testing.T) {
 	if _, err := Load(filepath.Join(t.TempDir(), "missing.yaml")); err == nil {
 		t.Fatal("缺失文件应该失败")
 	}
 	for name, body := range map[string]string{
-		"拼写错误":    "agent:\n  max_step: 2\n",
-		"已删除字段":   "wiki:\n  root: wiki\n",
 		"类型错误":    "agent:\n  max_steps: abc\n",
 		"时间错误":    "model:\n  timeout: tomorrow\n",
 		"YAML 损坏": "model: [\n",
