@@ -105,7 +105,7 @@ func TestInstalledServers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(registry.Servers) != 6 {
+	if len(registry.Servers) != 7 {
 		t.Fatalf("注册项数量错误: %d", len(registry.Servers))
 	}
 	root, err := filepath.EvalSymlinks(t.TempDir())
@@ -132,14 +132,15 @@ func TestInstalledServers(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	if len(s.Tools) != 5 {
-		t.Fatalf("预期 5 个只读工具，实际 %d", len(s.Tools))
+	if len(s.Tools) != 6 {
+		t.Fatalf("预期 6 个只读工具，实际 %d", len(s.Tools))
 	}
 	for _, tt := range []struct{ name, path, pattern, want string }{
 		{"filesystem__list_directory", root, "", "note.md"},
 		{"filesystem__read_text_file", filepath.Join(root, "note.md"), "", "缓存穿透"},
 		{"filesystem__search_files", root, "**/*.md", "note.md"},
 		{"ripgrep__search", root, "缓存穿透", "缓存穿透"},
+		{"files__read_file", filepath.Join(root, "note.md"), "", "缓存穿透"},
 	} {
 		args := map[string]string{"path": tt.path}
 		if tt.pattern != "" {

@@ -1,6 +1,6 @@
 # Tool Registry：从注册到调用
 
-**Tool Registry 接受两类工具：项目自己实现的 Go Tool，以及从 MCP 服务发现的 Tool。** 当前运行配置只启用了 MCP Tool；这只是现阶段的选择，注册入口已经支持普通 Go Tool。两类工具都以 EINO 的 `tool.BaseTool` 交给 Agent，由 EINO 按名称调用。
+**Tool Registry 接受两类工具：项目自己实现的 Go Tool，以及从 MCP 服务发现的 Tool。** 当前运行配置只启用了 MCP Tool；注册入口仍支持普通 Go Tool。两类工具都以 EINO 的 `tool.BaseTool` 交给 Agent，由 EINO 按名称调用。
 
 ```mermaid
 flowchart TD
@@ -35,11 +35,10 @@ registry.RegisterTools(agentConfig, mcpTools)
 agent, err := adk.NewChatModelAgent(appCtx, agentConfig)
 ```
 
-以后新增项目自己的 Tool，只需在同一位置加入列表，例如：
+以后新增项目自己的 Tool，也在同一位置加入列表，例如：
 
 ```go
-ownTools := []tool.BaseTool{newWikiStatsTool()}
-allTools := append(ownTools, mcpTools...)
+allTools := append(mcpTools, newWikiStatsTool())
 registry.RegisterTools(agentConfig, allTools)
 ```
 

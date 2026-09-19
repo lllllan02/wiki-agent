@@ -30,7 +30,8 @@ func TestExecutionBoundary(t *testing.T) {
 	upstream := &recordingTool{}
 	guarded := &executionTool{upstream: upstream, info: &schema.ToolInfo{Name: "filesystem__read_text_file"}, pathParameters: []string{"path"}, timeout: time.Second, maxBytes: 1024}
 	for _, args := range []string{`[]`, `{"path":"../other"}`, `{"path":"escape"}`, `{"path":"note.txt"}`} {
-		if _, err := guarded.InvokableRun(runcontext.With(context.Background(), runcontext.Metadata{WikiRoot: root}), args); err == nil {
+		result, err := guarded.InvokableRun(runcontext.With(context.Background(), runcontext.Metadata{WikiRoot: root}), args)
+		if err != nil || !strings.Contains(result, `"status":"error"`) {
 			t.Fatalf("非法调用被接受: %s", args)
 		}
 	}
@@ -50,7 +51,8 @@ func TestSearchLimitsBeforeDispatch(t *testing.T) {
 	upstream := &recordingTool{result: strings.Repeat("资料", 100)}
 	guarded := &executionTool{upstream: upstream, info: &schema.ToolInfo{Name: "ripgrep__search"}, pathParameters: []string{"path"}, timeout: time.Second, maxBytes: 21}
 	for _, args := range []string{`{"path":".","pattern":"-f/private"}`, `{"path":".","pattern":"ok","maxResults":101}`} {
-		if _, err := guarded.InvokableRun(runcontext.With(context.Background(), runcontext.Metadata{WikiRoot: root}), args); err == nil {
+		result, err := guarded.InvokableRun(runcontext.With(context.Background(), runcontext.Metadata{WikiRoot: root}), args)
+		if err != nil || !strings.Contains(result, `"status":"error"`) {
 			t.Fatalf("非法搜索被执行: %s", args)
 		}
 	}
@@ -66,9 +68,10 @@ func TestSearchLimitsBeforeDispatch(t *testing.T) {
 		t.Fatalf("搜索参数未收紧: %s", upstream.args)
 	}
 	var bounded struct {
-		Truncated bool `json:"truncated"`
+		Status    string `json:"status"`
+		Truncated bool   `json:"truncated"`
 	}
-	if err := json.Unmarshal([]byte(result), &bounded); err != nil || !bounded.Truncated {
+	if err := json.Unmarshal([]byte(result), &bounded); err != nil || !bounded.Truncated || bounded.Status != "truncated" {
 		t.Fatalf("过长输出未标注截断: %s", result)
 	}
 }

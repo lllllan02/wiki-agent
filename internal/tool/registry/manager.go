@@ -108,6 +108,9 @@ func LoadMCP(lifetime context.Context, cfg config.MCP) (_ *Manager, err error) {
 		if !found || !known {
 			return nil, fmt.Errorf("工具 %s 没有对应的 MCP 配置", info.Name)
 		}
+		if info.Name == "files__read_file" {
+			info.Desc += " 本应用仅允许读取 Markdown；必须传 1-based offset 和 1 到 200 的 limit，按返回的 continuation 继续。"
+		}
 		guarded := &executionTool{
 			upstream: invokable, info: info, pathParameters: server.PathParameters,
 			timeout: cfg.Timeout, maxBytes: cfg.MaxBytes,

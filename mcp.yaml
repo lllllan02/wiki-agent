@@ -20,6 +20,17 @@ servers:
     tools: [search]
     path_parameters: [path]
 
+  - name: files
+    enabled: true # 现成 Files MCP 的行窗口分页；只开放只读 read_file。
+    transport: stdio
+    command: node
+    args: ["${PROJECT_ROOT}/mcp/node_modules/@abhishekmcp/files/dist/index.js"]
+    env:
+      FS_ROOTS: "/"
+      FS_READONLY: "1"
+    tools: [read_file]
+    path_parameters: [path]
+
   - name: tavily
     enabled: false # 填写自己的 API key 后启用；查询将发送到 Tavily。
     transport: streamable_http

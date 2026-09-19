@@ -6,9 +6,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
@@ -33,31 +34,36 @@ func (t *executionTool) Info(context.Context) (*schema.ToolInfo, error) { return
 // InvokableRun 的顺序是：取得本轮目录、检查并改写参数、限制具体工具能力、
 // 带本轮超时调用上游，最后限制返回给模型的内容。每一步都只使用局部变量。
 func (t *executionTool) InvokableRun(ctx context.Context, arguments string, opts ...tool.Option) (string, error) {
+	source := t.info.Name
 	// 只有声明了路径参数的工具才依赖 Wiki；网络搜索等工具不能被无关的目录条件阻挡。
 	var root string
 	if len(t.pathParameters) > 0 {
 		var err error
 		root, err = wikiPath(runcontext.From(ctx).WikiRoot)
 		if err != nil {
-			return "", err
+			return errorResultCode(source, "invalid_scope", err.Error()), nil
 		}
 	}
 	// schema 和提示词不能代替程序校验：模型输出仍可能是 null、数组或错误类型。
 	// 在本轮局部 map 上改写参数，不能改共享工具对象，也不能直接转发未检查的原始 JSON。
 	var args map[string]any
 	if err := json.Unmarshal([]byte(arguments), &args); err != nil || args == nil {
-		return "", fmt.Errorf("工具参数必须是 JSON 对象")
+		return errorResultCode(source, "invalid_arguments", "工具参数必须是 JSON 对象"), nil
 	}
+	if err := validateArguments(t.info, args); err != nil {
+		return errorResultCode(source, "invalid_arguments", err.Error()), nil
+	}
+	inputPath, _ := args["path"].(string)
 	// 参数名来自受信任的部署配置。路径由“应用选定目录 + 模型相对路径”确定，
 	// 不接受模型自行指定一个新的根目录；转换为绝对路径也避免依赖 MCP 进程工作目录。
 	for _, key := range t.pathParameters {
 		path, ok := args[key].(string)
 		if !ok || strings.TrimSpace(path) == "" {
-			return "", fmt.Errorf("%s 必须是 Wiki 内的路径", key)
+			return errorResultCode(source, "invalid_arguments", fmt.Sprintf("%s 必须是 Wiki 内的路径", key)), nil
 		}
 		resolved, err := scopedPath(root, path)
 		if err != nil {
-			return "", err
+			return errorResultCode(source, "invalid_scope", err.Error()), nil
 		}
 		args[key] = resolved
 	}
@@ -66,13 +72,39 @@ func (t *executionTool) InvokableRun(ctx context.Context, arguments string, opts
 	if t.info.Name == "filesystem__read_text_file" {
 		path, _ := args["path"].(string)
 		if !strings.EqualFold(filepath.Ext(path), ".md") {
-			return "", fmt.Errorf("当前 Wiki 只开放 Markdown 正文读取")
+			return errorResultCode(source, "invalid_arguments", "当前 Wiki 只开放 Markdown 正文读取"), nil
+		}
+		if args["head"] != nil && args["tail"] != nil {
+			return errorResultCode(source, "invalid_arguments", "head 与 tail 不能同时使用"), nil
+		}
+		for _, key := range []string{"head", "tail"} {
+			if value, exists := args[key]; exists {
+				n, ok := value.(float64)
+				if !ok || n < 1 || n > 1000 || n != float64(int(n)) {
+					return errorResultCode(source, "invalid_arguments", key+" 必须是 1 到 1000 的整数"), nil
+				}
+			}
+		}
+	}
+	if source == "files__read_file" {
+		path, _ := args["path"].(string)
+		if !strings.EqualFold(filepath.Ext(path), ".md") {
+			return errorResultCode(source, "invalid_arguments", "当前 Wiki 只开放 Markdown 正文读取"), nil
+		}
+		for _, key := range []string{"offset", "limit"} {
+			n, ok := args[key].(float64)
+			if !ok || n < 1 || n > 1e9 || n != float64(int(n)) || key == "limit" && n > 200 {
+				return errorResultCode(source, "invalid_arguments", "分页读取必须指定 offset（从 1 开始）和 limit（1 到 200 行）"), nil
+			}
+		}
+		if args["head"] != nil || args["tail"] != nil {
+			return errorResultCode(source, "invalid_arguments", "分页读取只使用 offset 和 limit"), nil
 		}
 	}
 	if t.info.Name == "ripgrep__search" {
 		pattern, ok := args["pattern"].(string)
 		if !ok || strings.TrimSpace(pattern) == "" || strings.HasPrefix(pattern, "-") {
-			return "", fmt.Errorf("搜索模式不能为空或以 - 开头")
+			return errorResultCode(source, "invalid_arguments", "搜索模式不能为空或以 - 开头"), nil
 		}
 		// 限定 Markdown、关闭终端颜色，防止无关资料与转义序列占用模型上下文。
 		// maxResults 是上游的每文件匹配上限，不是整个调用的总输出上限。
@@ -88,13 +120,13 @@ func (t *executionTool) InvokableRun(ctx context.Context, arguments string, opts
 			// encoding/json 将数字解为 float64；同时检查整数性，避免 1.5 被截成 1。
 			n, ok := v.(float64)
 			if !ok || n < 0 || n > limit || n != float64(int(n)) || (key == "maxResults" && n == 0) {
-				return "", fmt.Errorf("%s 必须是允许范围内的整数，最大 %g", key, limit)
+				return errorResultCode(source, "invalid_arguments", fmt.Sprintf("%s 必须是允许范围内的整数，最大 %g", key, limit)), nil
 			}
 		}
 	}
 	payload, err := json.Marshal(args)
 	if err != nil {
-		return "", err
+		return errorResult(source, "工具参数编码失败"), nil
 	}
 	// 超时从请求 context 派生：保留会话信息，并同时响应用户取消与工具超时。
 	// 只取消这次调用，不能取消 Manager 使用的应用 context，否则会关闭其他 Agent 的连接。
@@ -103,23 +135,49 @@ func (t *executionTool) InvokableRun(ctx context.Context, arguments string, opts
 	result, err := t.upstream.InvokableRun(callCtx, string(payload), opts...)
 	if err != nil {
 		if callCtx.Err() != nil {
-			return "", fmt.Errorf("工具 %s 调用取消或超时: %w", t.info.Name, callCtx.Err())
+			return errorResultCode(source, "cancelled_or_timeout", "工具调用取消或超时"), nil
 		}
 		// 外部错误可能回显认证信息或资料；只透传我们自己生成的工具名和通用提示。
-		return "", fmt.Errorf("工具 %s 调用失败，请检查参数或服务状态", t.info.Name)
+		return errorResult(source, "工具调用失败，请检查参数或服务状态"), nil
 	}
-	if len(result) <= t.maxBytes {
-		return result, nil
+	next := &continuation{Hint: "缩小查询范围后重试"}
+	if source == "filesystem__read_text_file" {
+		next = &continuation{Tool: "files__read_file", Arguments: map[string]any{"path": inputPath, "offset": 1, "limit": 50}}
 	}
-	// 按字节限制进入模型的资料量，但 UTF-8 汉字可能占多个字节，不能留下半个字符。
-	// 用显式标记包住片段，避免模型把被截断的 JSON 或文本误当成完整结果。
-	// MaxBytes 限制的是原结果前缀；JSON 包装与转义会增加长度，也不限制上游生成结果的内存。
-	result = result[:t.maxBytes]
-	for !utf8.ValidString(result) && len(result) > 0 {
-		result = result[:len(result)-1]
+	data := mcpData(result)
+	if source == "files__read_file" {
+		return pagedFileResult(source, data, t.maxBytes, inputPath, int(args["offset"].(float64)), int(args["limit"].(float64))), nil
 	}
-	bounded, _ := json.Marshal(map[string]any{"truncated": true, "content_prefix": result, "notice": "工具结果超过输出上限；请缩小查询或使用上游分页参数，不能将片段当作完整结果。"})
-	return string(bounded), nil
+	if (source == "ripgrep__search" || source == "filesystem__search_files") && (data.Text == "No matches found" || data.Text == "No matches found.") {
+		data = toolData{}
+	}
+	return boundedResult(source, data, t.maxBytes, next), nil
+}
+
+var pageNote = regexp.MustCompile(`\[showing (\d+)/(\d+) lines\]$`)
+
+func pagedFileResult(source string, data toolData, maxBytes int, path string, offset, limit int) string {
+	if len(data.Text)+len(data.Structured) > maxBytes {
+		if limit == 1 {
+			return boundedResult(source, data, maxBytes, &continuation{Hint: "单行超过输出上限，无法用行窗口完整读取"})
+		}
+		return boundedResult(source, data, maxBytes, &continuation{Tool: source, Arguments: map[string]any{"path": path, "offset": offset, "limit": max(1, limit/2)}})
+	}
+	r := toolResult{Status: "ok", Data: data, Source: source}
+	if strings.TrimSpace(data.Text) == "" && len(data.Structured) == 0 {
+		r.Status = "empty"
+		return resultJSON(r)
+	}
+	if match := pageNote.FindStringSubmatch(strings.TrimSpace(data.Text)); len(match) == 3 {
+		count, _ := strconv.Atoi(match[1])
+		total, _ := strconv.Atoi(match[2])
+		if next := offset + count; next <= total {
+			r.Status = "truncated"
+			r.Truncated = true
+			r.Continuation = &continuation{Tool: source, Arguments: map[string]any{"path": path, "offset": next, "limit": limit}}
+		}
+	}
+	return resultJSON(r)
 }
 
 // 不能用字符串前缀判断边界：/notes-other 也以 /notes 开头。

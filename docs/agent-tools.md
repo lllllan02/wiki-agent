@@ -6,11 +6,12 @@
 
 ## 1. 直接使用的 MCP
 
-以下 7 项已登记在 [mcp.yaml](../mcp.yaml)，通过 EINO 官方 MCP 适配器发现工具并交给 Agent。注册、安装、启用是不同状态：禁用项不会启动进程、连接外部服务或进入模型工具列表。
+以下 MCP 已登记在 [mcp.yaml](../mcp.yaml)，通过 EINO 官方 MCP 适配器发现工具并交给 Agent。注册、安装、启用是不同状态：禁用项不会启动进程、连接外部服务或进入模型工具列表。
 
 | 能力 | 选用 MCP | 当前开放范围 | 当前状态 |
 |---|---|---|---|
 | 文件读取、列目录、文件名搜索 | [Filesystem MCP](https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem) | `list_directory`、`search_files`、`read_text_file`、`get_file_info`；只限当前 Wiki，正文只读 Markdown | 已注册、安装，默认启用 |
+| 长笔记按行续读 | [Files MCP](https://github.com/Abhishekkumar2021/mcp-suite/tree/main/servers/files) | 只开放 `read_file` 的 `offset`/`limit` 行窗口；仍限当前 Wiki 的 Markdown | 已注册、安装，默认启用 |
 | 笔记正文搜索 | [ripgrep MCP](https://github.com/mcollina/mcp-ripgrep) | `search`；限制目录、Markdown、命中量与输出 | 已注册、安装，默认启用 |
 | 联网搜索、网页提取 | [Tavily MCP](https://docs.tavily.com/documentation/mcp) | `tavily-search`、`tavily-extract` | 已注册，待配置凭据后启用 |
 | 浏览器观察与交互 | [Playwright MCP](https://github.com/microsoft/playwright-mcp) | 预登记导航、标签页、页面观察、关闭；点击、输入、截图后续按能力开放 | 已注册、安装，暂不启用 |
@@ -34,7 +35,7 @@ Filesystem 已有创建、编辑、移动能力，后续完善写入门控后开
 | 子 Agent 管理 | `spawn_agent`、`get_agent_result`、`send_agent_message`、`cancel_agent` | 封装 EINO 子任务能力，补父子预算、归属与产物接纳；固定流程可能不需要暴露这些 Tool | L24–L25；待评估 |
 | 定期维护管理 | `create_schedule`、`list_schedules`、`update_schedule`、`delete_schedule` | 将本产品任务接到现成调度器；若只从 UI 配置，先不增加模型 Tool | L26；待评估 |
 
-L02 使用已登记的 Filesystem 和 ripgrep MCP 完成列目录、文件名搜索、正文搜索与读取。移除了本地 `read_note`、`list_notes` 和 `search_notes`，避免维护重复的文件工具。文件编辑、Git 操作、网页搜索、抓取、浏览器动作、记忆 CRUD 和反向链接继续按本表复用 MCP；业务 Tool 仍在需要其产品状态与规则的阶段实现。
+L02 使用已登记的 Filesystem 和 ripgrep MCP 完成列目录、文件名搜索、正文搜索与读取。移除了本地 `read_note`、`list_notes` 和 `search_notes`，避免维护重复的文件工具。L03 使用现成 Files MCP 的行窗口分页续读长笔记，没有新增 Go 文件读取工具。文件编辑、Git 操作、网页搜索、抓取、浏览器动作、记忆 CRUD 和反向链接继续按本表复用 MCP；业务 Tool 仍在需要其产品状态与规则的阶段实现。
 
 ## 3. 统一接入层负责什么
 

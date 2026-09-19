@@ -6,7 +6,7 @@
 
 WikiAgent 在构造时创建模型、从工具模块获取应用内共享的 MCP 管理器，并注册一次工具；默认 Filesystem 和 ripgrep 在此连接并发现，工具对象和 MCP 连接可供多个 Agent 复用。WikiAgent 只保留一个 EINO Agent，每轮通过上下文传入目录、创建支持流式输出的 Runner；运行方法不负责工具初始化或连接借用。
 
-`internal/tool/registry` 负责工具注册、EINO 并发适配、目录上下文、路径检查及连接生命周期。所有 MCP 跨 Agent 和目录共享，同一应用生命周期、同一份配置只初始化一次，不维护目录连接池。未知名称与重复注册明确报错。原本地 `read_note`、`list_notes` 和 `search_notes` 已移除。
+`internal/tool/registry` 负责工具注册、EINO 并发适配、目录上下文、路径检查及连接生命周期。所有 MCP 跨 Agent 和目录共享，同一应用生命周期、同一份配置只初始化一次，不维护目录连接池。原本地 `read_note`、`list_notes` 和 `search_notes` 已移除；L03 的分页读取复用 Files MCP。
 
 接入细节与限制见 [MCP 接入说明](mcp.md)，工具注册层的设计原因和源码阅读顺序见 [工具注册层详解](tool-registry.md)。提案、受控写入、持久恢复与多 Agent 尚未实现。
 

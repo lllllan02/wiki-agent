@@ -32,11 +32,11 @@ mcp:
 
 默认配置在创建 Agent 时连接并发现共享 MCP，此后所有窗口、目录和 Agent 复用工具对象与连接。所有服务统一共享，不按目录启动。`registry_file` 必须指定；留空会明确报错。已有用户配置不会被程序自动覆盖。
 
-首次自动生成的配置保留空的 `registry_file`，需安装并显式设置后启动。仓库注册表默认启用 Filesystem 和 ripgrep，共 5 个只读工具。
+首次自动生成的配置保留空的 `registry_file`，需安装并显式设置后启动。仓库注册表默认启用 Filesystem、ripgrep 和 Files，共 6 个只读工具。
 
 ## 注册表
 
-`mcp.yaml` 已登记 6 个服务。需要填写密钥或部署地址时，复制为被 Git 忽略的 `mcp.local.yaml`，将 `config.yaml` 的 `registry_file` 改为此文件；凭据只在本地文件中配置。
+`mcp.yaml` 已登记 7 个服务。需要填写密钥或部署地址时，复制为被 Git 忽略的 `mcp.local.yaml`，将 `config.yaml` 的 `registry_file` 改为此文件；凭据只在本地文件中配置。
 
 | 字段 | 含义 |
 |---|---|
@@ -51,6 +51,7 @@ mcp:
 本地命令参数只支持 `${PROJECT_ROOT}`（注册表所在目录）。知识库目录通过每次工具调用的参数传入，不支持启动时绑定 `${WIKI_ROOT}`。不要把注册表放到任意位置后仍假设 PROJECT_ROOT 指向仓库。
 
 - Filesystem / ripgrep：默认启用；Filesystem 读取仅限 `.md`。ripgrep 仅开放基础 `search`，强制 Markdown、关闭颜色并限制参数；其 `maxResults` 是每个文件的匹配上限，最终工具输出另有总字节上限。
+- Files：默认只读启用，只开放 `read_file` 的行窗口分页；启动根目录设为 `/` 以支持多个 Wiki，实际访问仍由逐次调用的路径检查限制在当前 Wiki。`offset` 从 1 开始，`limit` 最多 200 行。
 - Tavily：在本地副本中填写认证头，再设 `enabled: true`。注册不代表凭据已验证。
 - Playwright：已安装 MCP Server，选择系统 Chrome。当前只预登记基本观察工具；浏览器进程、页面交互和站点限制还须在 L23 验收。
 - Git：安装上述 Python 环境后，仅在当前 Wiki 是 Git 仓库时启用。不能将“允许本仓库路径”理解为已具备不可信 Git 配置的隔离沙箱。
@@ -70,7 +71,7 @@ EINO v0.9.19 直接静态注册工具后，同一 Agent 并发 Run 会竞争内�
 
 Filesystem MCP 目前以 `/` 作为进程启动根目录，因此跨目录复用不依赖重启；逐次访问范围由 Agent 工具执行层按真实路径限制。此进程本身拥有较宽的文件访问能力，只供本地 Agent 独占连接。当前执行层拒绝越界和符号链接逃逸；这是调用前检查，不是恶意并发改写路径下的 OS 沙箱。当前知识库仍按原项目约定由用户控制。未来放开写入、浏览器动作和不可信服务时，再补相应权限与隔离机制。
 
-输出超限会返回 `truncated: true` 和前缀，提示缩小范围或使用上游分页参数。截断不自动产生续读游标，也不限制上游读取整个文件的内存；EINO 当前适配器把 MCP 结果序列化成文本，截图多模态接入尚未验收，因此没有将截图工具加入现有白名单。
+L03 后，进入模型的工具结果统一为固定字段的 JSON。`status` 为 `ok`、`empty`、`error` 或 `truncated`；`data` 始终是对象，其中 `text` 是完整文本或明确标记的前缀，`structured` 保留 MCP 的 `structuredContent`（没有时为 `null`）；`error` 是带 `code`、`message` 的对象或 `null`；`source` 是工具名；`truncated` 是布尔值；`continuation` 是带 `tool`、`arguments`、`hint` 的对象或 `null`。例如分页读取后的结果包含 `"continuation":{"tool":"files__read_file","arguments":{"path":"note.md","offset":51,"limit":50}}`，模型可直接按参数继续调用。参数先按 MCP 公布的 schema 检查顶层必填字段、类型与基本范围，再执行 Wiki 路径、Markdown 类型和搜索限制等业务检查；复杂组合 schema 仍由上游服务验证。`mcp.max_bytes` 限制 `data.text` 与 `data.structured` 的总字节数，包装本身会额外占用少量字节，也不限制上游生成结果的内存。长 Markdown 可用现成 Files MCP 的 `files__read_file` 按 1-based `offset` 和 `limit`（最多 200 行）分页读取；若单页仍超限，应缩小 `limit` 重试。其他长结果需缩小查询范围。EINO 当前适配器把 MCP 结果序列化成文本，截图多模态接入尚未验收，因此没有将截图工具加入现有白名单。
 
 ## 验证
 

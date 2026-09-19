@@ -57,7 +57,7 @@ func TestInstalledSharedGit(t *testing.T) {
 			t.Fatalf("Git 目录未隔离: %s %v", result, err)
 		}
 		outside, _ := json.Marshal(map[string]string{"repo_path": roots[1-i]})
-		if _, err := read.InvokableRun(ctx, string(outside)); err == nil {
+		if result, err := read.InvokableRun(ctx, string(outside)); err != nil || !strings.Contains(result, `"status":"error"`) {
 			t.Fatal("Git 越界路径未拒绝")
 		}
 	}
@@ -80,6 +80,9 @@ func TestInstalledSharedFilesystem(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(root, "note.md"), []byte(root), 0600); err != nil {
 			t.Fatal(err)
 		}
+		if err := os.WriteFile(filepath.Join(root, "long.md"), []byte("一\n二\n三\n四\n五"), 0600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	first, err := manager.Tools()
 	if err != nil {
@@ -97,7 +100,7 @@ func TestInstalledSharedFilesystem(t *testing.T) {
 	if manager.connections != connections {
 		t.Fatal("默认 MCP 不应按目录增加进程")
 	}
-	var read tool.InvokableTool
+	var read, paged tool.InvokableTool
 	for _, base := range second {
 		info, err := base.Info(context.Background())
 		if err != nil {
@@ -105,6 +108,8 @@ func TestInstalledSharedFilesystem(t *testing.T) {
 		}
 		if info.Name == "filesystem__read_text_file" {
 			read = base.(tool.InvokableTool)
+		} else if info.Name == "files__read_file" {
+			paged = base.(tool.InvokableTool)
 		}
 	}
 	if read == nil {
@@ -115,7 +120,21 @@ func TestInstalledSharedFilesystem(t *testing.T) {
 		t.Fatalf("第二个目录无法使用共享 Filesystem: %s %v", result, err)
 	}
 	outside, _ := json.Marshal(map[string]string{"path": filepath.Join(a, "note.md")})
-	if _, err := read.InvokableRun(ctx, string(outside)); err == nil {
+	if result, err := read.InvokableRun(ctx, string(outside)); err != nil || !strings.Contains(result, `"status":"error"`) {
 		t.Fatal("共享进程不得绕过当前 Wiki 的访问边界")
+	}
+	if paged == nil {
+		t.Fatal("缺少现成分页 Files MCP 工具")
+	}
+	firstPage, err := paged.InvokableRun(ctx, `{"path":"long.md","offset":1,"limit":2}`)
+	if err != nil || !strings.Contains(firstPage, `"status":"truncated"`) || !strings.Contains(firstPage, `"offset":3`) || !strings.Contains(firstPage, "一") {
+		t.Fatalf("Files MCP 首次分页失败: %s %v", firstPage, err)
+	}
+	lastPage, err := paged.InvokableRun(ctx, `{"path":"long.md","offset":3,"limit":3}`)
+	if err != nil || !strings.Contains(lastPage, `"status":"ok"`) || !strings.Contains(lastPage, "五") {
+		t.Fatalf("Files MCP 续读失败: %s %v", lastPage, err)
+	}
+	if result, err := paged.InvokableRun(ctx, string(outside)); err != nil || !strings.Contains(result, `"status":"error"`) {
+		t.Fatal("Files MCP 越界读取未拒绝")
 	}
 }
