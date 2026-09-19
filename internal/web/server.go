@@ -2,28 +2,37 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"embed"
+	"encoding/json"
+	"errors"
 	"io/fs"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 
 	"github.com/gin-gonic/gin"
 	"github.com/lllllan02/wiki-agent/internal/agent"
 	"github.com/lllllan02/wiki-agent/internal/runcontext"
+	"github.com/yuin/goldmark"
+	"github.com/yuin/goldmark/extension"
 )
 
 //go:embed static/index.html
 var staticFiles embed.FS
 
 type WikiAgent interface {
-	RunWithHistory(context.Context, string) (*agent.Result, error)
+	Stream(context.Context, string, func(string) error) (*agent.Result, error)
 }
 type Server struct {
 	agent         WikiAgent
 	mu            sync.Mutex
 	conversations map[string]*conversationState
+	pickDirectory func(context.Context) (string, error)
 }
 type conversationState struct {
 	mu   sync.Mutex
@@ -31,7 +40,7 @@ type conversationState struct {
 }
 
 func New(wikiAgent WikiAgent) *Server {
-	return &Server{agent: wikiAgent, conversations: make(map[string]*conversationState)}
+	return &Server{agent: wikiAgent, conversations: make(map[string]*conversationState), pickDirectory: systemDirectoryPicker}
 }
 func (s *Server) Handler() *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
@@ -43,7 +52,8 @@ func (s *Server) Handler() *gin.Engine {
 	router.GET("/api/health", func(c *gin.Context) { c.JSON(200, gin.H{"status": "ok"}) })
 	router.GET("/api/project", s.project)
 	router.POST("/api/project", s.openProject)
-	router.POST("/api/chat", s.chat)
+	router.POST("/api/project/pick", s.pickProject)
+	router.POST("/api/chat/stream", s.streamChat)
 	return router
 }
 
@@ -58,8 +68,7 @@ type chatRequest struct {
 	Message string `json:"message"`
 }
 type chatResponse struct {
-	Answer string `json:"answer,omitempty"`
-	Error  string `json:"error,omitempty"`
+	Error string `json:"error,omitempty"`
 }
 
 func (s *Server) project(c *gin.Context) {
@@ -85,7 +94,36 @@ func (s *Server) openProject(c *gin.Context) {
 		c.JSON(400, projectResponse{Error: "请输入要打开的知识库目录"})
 		return
 	}
-	root := strings.TrimSpace(req.Root)
+	s.setProject(c, id, req.Root)
+}
+func (s *Server) pickProject(c *gin.Context) {
+	id := conversationID(c)
+	if id == "" {
+		c.JSON(400, projectResponse{Error: "请提供有效的 X-Conversation-ID"})
+		return
+	}
+	root, err := s.pickDirectory(c.Request.Context())
+	if err != nil {
+		if errors.Is(err, errPickerCanceled) {
+			c.Status(204)
+			return
+		}
+		c.JSON(500, projectResponse{Error: friendlyError(err)})
+		return
+	}
+	s.setProject(c, id, root)
+}
+func (s *Server) setProject(c *gin.Context, id, requestedRoot string) {
+	requestedRoot = strings.TrimSpace(requestedRoot)
+	if requestedRoot == "" {
+		c.JSON(400, projectResponse{Error: "请选择存在的 Wiki 目录"})
+		return
+	}
+	root, err := filepath.Abs(requestedRoot)
+	if err != nil {
+		c.JSON(400, projectResponse{Error: "请选择存在的 Wiki 目录"})
+		return
+	}
 	state := s.state(id)
 	state.mu.Lock()
 	defer state.mu.Unlock()
@@ -96,7 +134,14 @@ func (s *Server) openProject(c *gin.Context) {
 	state.root = root
 	c.JSON(200, projectResponse{Root: root})
 }
-func (s *Server) chat(c *gin.Context) {
+
+type streamEvent struct {
+	Type  string `json:"type"`
+	HTML  string `json:"html,omitempty"`
+	Error string `json:"error,omitempty"`
+}
+
+func (s *Server) streamChat(c *gin.Context) {
 	id := conversationID(c)
 	if id == "" {
 		c.JSON(400, chatResponse{Error: "请提供有效的 X-Conversation-ID"})
@@ -108,7 +153,7 @@ func (s *Server) chat(c *gin.Context) {
 		return
 	}
 	state := s.state(id)
-	// 同一对话串行推进，其他对话可以并行使用同一或不同 Wiki 的工具。
+	// 同一对话串行推进，其他对话可并行使用各自的 Wiki 上下文。
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	if state.root == "" {
@@ -116,12 +161,65 @@ func (s *Server) chat(c *gin.Context) {
 		return
 	}
 	ctx := runcontext.With(c.Request.Context(), runcontext.Metadata{SessionID: id, WikiRoot: state.root})
-	result, err := s.agent.RunWithHistory(ctx, strings.TrimSpace(req.Message))
+	c.Header("Content-Type", "application/x-ndjson; charset=utf-8")
+	c.Header("Cache-Control", "no-cache, no-transform")
+	c.Header("X-Accel-Buffering", "no")
+	c.Status(200)
+	// 每个事件占一行 JSON。Flush 让浏览器在本轮 Agent 结束前也能收到 update。
+	write := func(event streamEvent) error {
+		if err := json.NewEncoder(c.Writer).Encode(event); err != nil {
+			return err
+		}
+		c.Writer.Flush()
+		return nil
+	}
+	// onText 是传给 Agent.Stream 的回调。answer 是当前助手消息截至
+	// 这一段的完整 Markdown，而不是单个 token；每次都重绘同一个回答区域。
+	onText := func(answer string) error {
+		html, err := renderMarkdown(answer)
+		if err != nil {
+			return err
+		}
+		return write(streamEvent{Type: "update", HTML: html})
+	}
+	result, err := s.agent.Stream(ctx, strings.TrimSpace(req.Message), onText)
 	if err != nil {
-		c.JSON(502, chatResponse{Error: friendlyError(err)})
+		if ctx.Err() == nil {
+			_ = write(streamEvent{Type: "error", Error: friendlyError(err)})
+		}
 		return
 	}
-	c.JSON(200, chatResponse{Answer: result.Answer})
+	// 只有 EINO 事件迭代结束、Agent 返回最终 Result 后，才发送 done。
+	html, err := renderMarkdown(result.Answer)
+	if err != nil {
+		_ = write(streamEvent{Type: "error", Error: "回答渲染失败"})
+		return
+	}
+	_ = write(streamEvent{Type: "done", HTML: html})
+}
+
+func renderMarkdown(answer string) (string, error) {
+	var rendered bytes.Buffer
+	err := goldmark.New(goldmark.WithExtensions(extension.GFM)).Convert([]byte(answer), &rendered)
+	return rendered.String(), err
+}
+
+var errPickerCanceled = errors.New("directory picker canceled")
+
+func systemDirectoryPicker(ctx context.Context) (string, error) {
+	if runtime.GOOS != "darwin" {
+		return "", errors.New("当前系统暂不支持目录选择弹窗")
+	}
+	cmd := exec.CommandContext(ctx, "osascript", "-e", `POSIX path of (choose folder with prompt "选择知识库目录")`)
+	output, err := cmd.Output()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && strings.Contains(string(exitErr.Stderr), "-128") {
+			return "", errPickerCanceled
+		}
+		return "", errors.New("无法打开系统目录选择窗口")
+	}
+	return strings.TrimSpace(string(output)), nil
 }
 func (s *Server) state(id string) *conversationState {
 	s.mu.Lock()

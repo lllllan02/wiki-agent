@@ -5,127 +5,178 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Wiki Agent</title>
   <style>
-    body{margin:0;background:#f6f7f9;color:#20242a;font:16px system-ui,sans-serif}
-    main{max-width:920px;margin:36px auto;padding:0 20px}
-    h1{font-size:28px;margin:0 0 6px}.sub{color:#68707c;margin-bottom:18px}
-    .project,.chat{background:white;border:1px solid #dfe3e8;border-radius:8px;box-shadow:0 4px 18px #0000000a}
-    .project{display:grid;grid-template-columns:1fr auto;gap:10px;padding:14px;margin-bottom:14px}.project label{grid-column:1/-1;font-size:13px;color:#66707d}.project select{grid-column:1/-1;width:100%;height:38px;border:1px solid #cdd3db;border-radius:8px;background:white;color:#475569;padding:0 10px}
-    input,textarea{box-sizing:border-box;width:100%;border:1px solid #cdd3db;border-radius:8px;font:inherit;background:white;color:inherit}
-    input{height:42px;padding:0 12px}
-    textarea{flex:1;resize:vertical;min-height:58px;padding:12px}
-    button{border:0;border-radius:8px;padding:0 20px;background:#2563eb;color:white;font:inherit;cursor:pointer}
-    button.secondary{background:#3f4652}
-    button:disabled{opacity:.5;cursor:not-allowed}
-    .chat{min-height:420px;padding:20px}
-    .msg{white-space:pre-wrap;line-height:1.6;margin:14px 0;padding:12px 15px;border-radius:8px;max-width:82%}
-    .user{margin-left:auto;background:#e5efff}.agent{background:#f0f2f5}.error{background:#fff0f0;color:#a31d1d}.system{background:#eef7f1;color:#245338}
-    .bar{display:flex;gap:10px;margin-top:14px}.tip{font-size:13px;color:#7b838e;margin-top:10px}
-    @media (max-width:640px){.project,.bar{display:flex;flex-direction:column}.msg{max-width:100%}button{height:42px}}
+    :root{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;color:#1d2939;background:#f6f8fb}
+    *{box-sizing:border-box}body{margin:0}button,textarea,select{font:inherit}button{cursor:pointer}button:disabled{cursor:not-allowed;opacity:.55}
+    .app{max-width:1080px;min-height:100dvh;margin:auto;padding:28px 24px 32px;display:flex;flex-direction:column;gap:18px}
+    .top{display:flex;align-items:center;justify-content:space-between;gap:20px}h1{font-size:24px;letter-spacing:-.03em;margin:0}.subtitle{font-size:13px;color:#667085;margin:5px 0 0}
+    .project{display:flex;align-items:center;gap:10px;min-width:0}.project-current{min-width:0;max-width:280px;display:flex;align-items:center;gap:8px;padding:9px 12px;border:1px solid #e1e6ed;border-radius:12px;background:#fff;color:#475467;font-size:13px}
+    .project-current span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.project-current svg{flex:none}
+    .project button,.composer button{border:0;border-radius:11px;background:#2563eb;color:#fff;font-weight:600;padding:10px 16px;white-space:nowrap}.project button:hover:not(:disabled),.composer button:hover:not(:disabled){background:#1d4ed8}
+    .recent{border:1px solid #e1e6ed;border-radius:10px;background:#fff;color:#475467;padding:9px 10px;max-width:180px;font-size:13px}.recent[hidden]{display:none}
+    .workspace{flex:1;min-height:540px;display:flex;flex-direction:column;background:#fff;border:1px solid #e4e9f0;border-radius:18px;box-shadow:0 12px 32px #26364a0a;overflow:hidden}
+    .conversation{flex:1;min-height:370px;max-height:calc(100dvh - 255px);overflow-y:auto;padding:28px clamp(20px,5vw,56px);scroll-behavior:smooth}
+    .empty{height:100%;min-height:300px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;color:#667085}
+    .empty-icon{width:48px;height:48px;display:grid;place-items:center;border-radius:15px;background:#eff5ff;color:#2563eb;font-size:24px;margin-bottom:15px}.empty h2{font-size:18px;color:#344054;margin:0 0 7px}.empty p{font-size:14px;line-height:1.6;margin:0}
+    .message{margin:0 0 28px;line-height:1.7}.message.user{display:flex;justify-content:flex-end}.user-bubble{max-width:min(78%,650px);padding:11px 16px;border-radius:18px 18px 5px 18px;background:#e9f1ff;color:#173864;white-space:pre-wrap;overflow-wrap:anywhere}
+    .message.assistant{max-width:100%;color:#273445}.assistant-label{font-size:12px;font-weight:650;color:#667085;letter-spacing:.02em;margin-bottom:8px}
+    .markdown{overflow-wrap:anywhere}.markdown>:first-child{margin-top:0}.markdown>:last-child{margin-bottom:0}
+    .markdown p,.markdown ul,.markdown ol,.markdown blockquote,.markdown pre,.markdown table{margin:0 0 1em}.markdown h1,.markdown h2,.markdown h3,.markdown h4{line-height:1.35;margin:1.35em 0 .6em;color:#182230}
+    .markdown h1{font-size:1.55em}.markdown h2{font-size:1.3em}.markdown h3{font-size:1.12em}.markdown ul,.markdown ol{padding-left:1.55em}.markdown li+li{margin-top:.25em}
+    .markdown a{color:#175cd3;text-decoration:underline;text-underline-offset:2px}.markdown blockquote{border-left:3px solid #adc6ef;padding:.1em 1em;color:#596579;background:#f8faff}
+    .markdown code{font:.88em ui-monospace,SFMono-Regular,Consolas,monospace;background:#f1f4f8;border-radius:4px;padding:.16em .35em}.markdown pre{padding:15px 18px;background:#17212e;color:#edf4fb;border-radius:11px;overflow-x:auto;line-height:1.55}.markdown pre code{background:none;padding:0;color:inherit;font-size:13px}
+    .markdown table{display:block;overflow-x:auto;border-collapse:collapse;max-width:100%}.markdown th,.markdown td{border:1px solid #dce3ec;padding:7px 11px;text-align:left;white-space:nowrap}.markdown th{background:#f5f7fa}.markdown img{max-width:100%;height:auto}.markdown hr{border:0;border-top:1px solid #e4e9f0;margin:1.5em 0}
+    .notice{margin:0 0 22px;padding:10px 14px;border-radius:10px;background:#eff8f2;color:#26704a;font-size:13px;overflow-wrap:anywhere}.notice.error{background:#fff1f1;color:#b42318}
+    .composer-wrap{border-top:1px solid #edf0f4;padding:16px clamp(16px,4vw,40px) 14px;background:#fff}.composer{display:flex;align-items:flex-end;gap:12px;padding:8px;border:1px solid #d8e0e9;border-radius:14px;box-shadow:0 2px 8px #1d293905}.composer:focus-within{border-color:#6a9df5;box-shadow:0 0 0 3px #2563eb18}
+    textarea{flex:1;min-width:0;min-height:42px;max-height:180px;resize:vertical;border:0;outline:0;padding:10px 8px;background:transparent;color:#1d2939;line-height:1.5}textarea::placeholder{color:#98a2b3}.composer button{min-width:66px;margin-bottom:1px}.tip{margin:10px 4px 0;color:#98a2b3;font-size:12px}
+    @media(max-width:720px){.app{padding:16px 12px;gap:12px}.top{align-items:flex-start;flex-direction:column}.project{width:100%;flex-wrap:wrap}.project-current{flex:1;max-width:none}.recent{max-width:100%}.workspace{min-height:calc(100dvh - 180px)}.conversation{max-height:none;padding:24px 18px}.user-bubble{max-width:90%}}
   </style>
 </head>
 <body>
-  <main>
-    <h1>Wiki Agent</h1>
-    <div class="sub">本地 Wiki 助手 · 每个窗口可选择知识库并独立对话</div>
-    <form id="projectForm" class="project">
-      <label for="projectRoot">知识库目录</label>
-      <input id="projectRoot" placeholder="/Users/me/notes" required>
-      <button id="openProject" class="secondary">打开</button>
-      <select id="recentProjects" aria-label="最近打开的目录"><option value="">最近打开的目录</option></select>
-    </form>
-    <section id="chat" class="chat"></section>
-    <form id="form" class="bar">
-      <textarea id="input" placeholder="例如：读取 notes/cache.md，总结缓存穿透。" required></textarea>
-      <button id="send">发送</button>
-    </form>
-    <div class="tip">Enter 发送，Shift+Enter 换行。当前每次提问独立处理，不会记住之前的对话。</div>
+  <main class="app">
+    <header class="top">
+      <div><h1>Wiki Agent</h1><p class="subtitle">探索本地知识库，整理你的想法</p></div>
+      <div class="project">
+        <div class="project-current" title="当前知识库"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10H3z"/></svg><span id="currentProject">尚未选择知识库</span></div>
+        <select id="recentProjects" class="recent" aria-label="最近打开的知识库" hidden><option value="">最近打开</option></select>
+        <button id="pickProject" type="button">选择知识库</button>
+      </div>
+    </header>
+    <section class="workspace" aria-label="对话">
+      <div id="conversation" class="conversation" aria-live="polite">
+        <div id="empty" class="empty"><div class="empty-icon">✦</div><h2>从你的知识库开始</h2><p>选择一个本地目录，然后向 Wiki Agent 提问。</p></div>
+      </div>
+      <div class="composer-wrap">
+        <form id="form" class="composer"><textarea id="input" rows="1" placeholder="先选择知识库，再输入问题…" aria-label="输入问题" disabled required></textarea><button id="send" disabled>发送</button></form>
+        <p class="tip">Enter 发送 · Shift + Enter 换行 · 当前每次提问独立处理</p>
+      </div>
+    </section>
   </main>
   <script>
-    const chat=document.querySelector('#chat');
+    const conversation=document.querySelector('#conversation');
+    const empty=document.querySelector('#empty');
     const input=document.querySelector('#input');
     const form=document.querySelector('#form');
     const send=document.querySelector('#send');
-    const projectForm=document.querySelector('#projectForm');
-    const projectRoot=document.querySelector('#projectRoot');
-    const openProject=document.querySelector('#openProject');
+    const pickProject=document.querySelector('#pickProject');
+    const currentProject=document.querySelector('#currentProject');
     const recentProjects=document.querySelector('#recentProjects');
     const conversationId=sessionStorage.getItem('wikiConversationId')||crypto.randomUUID();
     sessionStorage.setItem('wikiConversationId',conversationId);
-
-    function add(text,kind){
+    let activeRoot='';
+    let busy=false;
+    function scrollToBottom(){conversation.scrollTop=conversation.scrollHeight}
+    function notice(message,error=false){
+      empty?.remove();
       const el=document.createElement('div');
-      el.className='msg '+kind;
-      el.textContent=text;
-      chat.appendChild(el);
-      el.scrollIntoView({behavior:'smooth'});
+      el.className='notice'+(error?' error':'');
+      el.textContent=message;
+      conversation.appendChild(el);
+      scrollToBottom();
       return el;
     }
-
-    function recentRoots(){
-      try{return JSON.parse(localStorage.getItem('wikiRecentProjects')||'[]').filter(x=>typeof x==='string')}catch{return []}
+    function addUser(message){
+      empty?.remove();
+      const row=document.createElement('div');row.className='message user';
+      const bubble=document.createElement('div');bubble.className='user-bubble';bubble.textContent=message;
+      row.appendChild(bubble);conversation.appendChild(row);scrollToBottom();
     }
+    function addAssistant(html){
+      const row=document.createElement('article');row.className='message assistant';
+      const label=document.createElement('div');label.className='assistant-label';label.textContent='Wiki Agent';
+      const body=document.createElement('div');body.className='markdown';
+      row.append(label,body);conversation.appendChild(row);scrollToBottom();
+      setAssistantHTML(row,html);
+      return row;
+    }
+    function setAssistantHTML(row,html){
+      const body=row.querySelector('.markdown');body.innerHTML=html;
+      for(const link of body.querySelectorAll('a')){link.target='_blank';link.rel='noopener noreferrer'}
+      scrollToBottom();
+    }
+    function recentRoots(){try{return JSON.parse(localStorage.getItem('wikiRecentProjects')||'[]').filter(x=>typeof x==='string')}catch{return []}}
     function showRecent(){
-      recentProjects.replaceChildren(new Option('最近打开的目录',''));
+      recentProjects.replaceChildren(new Option('最近打开',''));
       for(const root of recentRoots())recentProjects.add(new Option(root,root));
+      recentProjects.hidden=recentProjects.options.length<=1;
     }
     function remember(root){
       localStorage.setItem('wikiRecentProjects',JSON.stringify([root,...recentRoots().filter(x=>x!==root)].slice(0,10)));
       showRecent();
     }
-    async function loadProject(){
-      showRecent();
-      const res=await fetch('/api/project',{headers:{'X-Conversation-ID':conversationId}});
-      const data=await res.json();
-      projectRoot.value=data.root||sessionStorage.getItem('wikiLastProject')||'';
+    function setBusy(value){busy=value;send.disabled=value||!activeRoot;input.disabled=value||!activeRoot;pickProject.disabled=value;recentProjects.disabled=value}
+    function applyProject(root){
+      activeRoot=root;
+      currentProject.textContent=root.split('/').filter(Boolean).pop()||root;
+      currentProject.parentElement.title=root;
+      conversation.replaceChildren();
+      notice('已打开知识库：'+root);
+      remember(root);
+      input.placeholder='向当前知识库提问…';
+      setBusy(false);input.focus();
     }
-    recentProjects.addEventListener('change',()=>{if(recentProjects.value)projectRoot.value=recentProjects.value});
-    projectForm.addEventListener('submit',async e=>{
-      e.preventDefault();
-      const root=projectRoot.value.trim();
-      if(!root)return;
-      openProject.disabled=true;
+    async function openRecent(root){
+      setBusy(true);
       try{
         const res=await fetch('/api/project',{method:'POST',headers:{'Content-Type':'application/json','X-Conversation-ID':conversationId},body:JSON.stringify({root})});
         const data=await res.json();
-        if(!res.ok||data.error){add(data.error||'目录打开失败','error');return}
-        chat.textContent='';
-        projectRoot.value=data.root;
-        sessionStorage.setItem('wikiLastProject',data.root);
-        remember(data.root);
-        add('已打开知识库：'+data.root,'system');
-      }catch(err){add('无法连接本地服务：'+err.message,'error')}
-      finally{openProject.disabled=false;input.focus()}
+        if(!res.ok||data.error)throw new Error(data.error||'无法打开知识库');
+        applyProject(data.root);
+      }catch(err){notice(err.message,true)}finally{setBusy(false);recentProjects.value=''}
+    }
+    recentProjects.addEventListener('change',()=>{if(recentProjects.value)openRecent(recentProjects.value)});
+    pickProject.addEventListener('click',async()=>{
+      setBusy(true);
+      try{
+        const res=await fetch('/api/project/pick',{method:'POST',headers:{'X-Conversation-ID':conversationId}});
+        if(res.status===204)return;
+        const data=await res.json();
+        if(!res.ok||data.error)throw new Error(data.error||'无法选择知识库');
+        applyProject(data.root);
+      }catch(err){notice(err.message,true)}finally{setBusy(false)}
     });
-
     form.addEventListener('submit',async e=>{
       e.preventDefault();
       const message=input.value.trim();
-      if(!message)return;
-      input.value='';
-      add(message,'user');
-      send.disabled=true;
-      const wait=add('正在处理…','agent');
+      if(!message||busy||!activeRoot)return;
+      input.value='';addUser(message);setBusy(true);
+      const waiting=addAssistant('<p>正在处理…</p>');
+      let hasUpdate=false;
       try{
-        const res=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json','X-Conversation-ID':conversationId},body:JSON.stringify({message})});
-        const data=await res.json();
-        wait.remove();
-        add(data.answer||data.error||'没有收到有效回答',data.error?'error':'agent');
-      }catch(err){
-        wait.remove();
-        add('无法连接本地服务：'+err.message,'error');
-      }finally{
-        send.disabled=false;
-        input.focus();
-      }
+        const res=await fetch('/api/chat/stream',{method:'POST',headers:{'Content-Type':'application/json','X-Conversation-ID':conversationId},body:JSON.stringify({message})});
+        if(!res.ok){const data=await res.json();throw new Error(data.error||'请求失败')}
+        if(!res.body)throw new Error('浏览器不支持流式读取');
+        const reader=res.body.getReader();
+        const decoder=new TextDecoder();
+        let pending='';let done=false;
+        // Go 每次 Flush 一行 JSON；网络读取可能把一行拆开或把多行合在一起。
+        // 因此先累积到换行，再按事件类型更新同一条助手消息。
+        const handleLine=line=>{
+          if(!line.trim())return;
+          const event=JSON.parse(line);
+          if(event.type==='error')throw new Error(event.error||'回答失败');
+          if(event.type==='update'||event.type==='done'){
+            // update 来自 Agent 的 onText；done 表示整轮 Agent 已结束。
+            setAssistantHTML(waiting,event.html||'');hasUpdate=true;
+            if(event.type==='done')done=true;
+          }
+        };
+        while(true){
+          const {value,done:streamEnded}=await reader.read();
+          if(streamEnded)break;
+          pending+=decoder.decode(value,{stream:true});
+          let newline;
+          while((newline=pending.indexOf('\n'))!==-1){handleLine(pending.slice(0,newline));pending=pending.slice(newline+1)}
+        }
+        pending+=decoder.decode();
+        if(pending.trim())handleLine(pending);
+        if(!done)throw new Error('回答连接提前中断');
+      }catch(err){if(!hasUpdate)waiting.remove();notice(err.message,true)}finally{setBusy(false);input.focus()}
     });
-
-    input.addEventListener('keydown',e=>{
-      if(e.key==='Enter'&&!e.shiftKey){
-        e.preventDefault();
-        form.requestSubmit();
-      }
-    });
-    loadProject().then(()=>input.focus()).catch(err=>add('读取当前项目失败：'+err.message,'error'));
+    input.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing){e.preventDefault();form.requestSubmit()}});
+    showRecent();
+    fetch('/api/project',{headers:{'X-Conversation-ID':conversationId}}).then(res=>res.json()).then(data=>{
+      if(data.root)applyProject(data.root);
+    }).catch(err=>notice('读取当前知识库失败：'+err.message,true));
   </script>
 </body>
 </html>

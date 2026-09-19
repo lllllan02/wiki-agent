@@ -59,7 +59,8 @@ func TestAgentSearchReadAnswerWithMCP(t *testing.T) {
 	model := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		modelCalls++
 		var request struct {
-			Tools []struct {
+			Stream bool `json:"stream"`
+			Tools  []struct {
 				Function struct {
 					Name string `json:"name"`
 				} `json:"function"`
@@ -73,6 +74,9 @@ func TestAgentSearchReadAnswerWithMCP(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			t.Error(err)
 		}
+		if !request.Stream {
+			t.Error("model request did not enable streaming")
+		}
 		names := map[string]bool{}
 		for _, item := range request.Tools {
 			names[item.Function.Name] = true
@@ -80,26 +84,28 @@ func TestAgentSearchReadAnswerWithMCP(t *testing.T) {
 		if len(names) != 2 || !names["ripgrep__search"] || !names["filesystem__read_text_file"] {
 			t.Errorf("unexpected tool registry: %+v", names)
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Type", "text/event-stream")
+		var payload string
 		switch (modelCalls-1)%3 + 1 {
 		case 1:
 			if len(request.Messages) != 2 || request.Messages[0].Role != "system" || request.Messages[1].Role != "user" {
 				t.Errorf("单轮请求混入其他轮消息: %+v", request.Messages)
 			}
-			fmt.Fprint(w, `{"id":"one","choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"search-1","type":"function","function":{"name":"ripgrep__search","arguments":"{\"pattern\":\"缓存穿透\",\"path\":\".\"}"}}]},"finish_reason":"tool_calls"}]}`)
+			payload = `{"id":"one","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"search-1","type":"function","function":{"name":"ripgrep__search","arguments":"{\"pattern\":\"缓存穿透\",\"path\":\".\"}"}}]},"finish_reason":"tool_calls"}]}`
 		case 2:
 			last := request.Messages[len(request.Messages)-1]
 			if last.Role != "tool" || last.ToolCallID != "search-1" || !strings.Contains(last.Content, "notes/cache.md") {
 				t.Errorf("search result not correlated: %+v", last)
 			}
-			fmt.Fprint(w, `{"id":"two","choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"read-2","type":"function","function":{"name":"filesystem__read_text_file","arguments":"{\"path\":\"notes/cache.md\"}"}}]},"finish_reason":"tool_calls"}]}`)
+			payload = `{"id":"two","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"read-2","type":"function","function":{"name":"filesystem__read_text_file","arguments":"{\"path\":\"notes/cache.md\"}"}}]},"finish_reason":"tool_calls"}]}`
 		default:
 			last := request.Messages[len(request.Messages)-1]
 			if last.Role != "tool" || last.ToolCallID != "read-2" || !strings.Contains(last.Content, "缓存空值") {
 				t.Errorf("read result not correlated: %+v", last)
 			}
-			fmt.Fprint(w, `{"id":"three","choices":[{"index":0,"message":{"role":"assistant","content":"根据 notes/cache.md，可缓存空值。"},"finish_reason":"stop"}]}`)
+			payload = `{"id":"three","choices":[{"index":0,"delta":{"role":"assistant","content":"根据 notes/cache.md，可缓存空值。"},"finish_reason":"stop"}]}`
 		}
+		fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", payload)
 	}))
 	defer model.Close()
 	cfg, err := config.NewDefaults[config.Config]()
@@ -128,7 +134,7 @@ func TestAgentSearchReadAnswerWithMCP(t *testing.T) {
 	}
 	agents := []*agent.WikiAgent{a, secondAgent, a}
 	for i, runRoot := range []string{root, other, root} {
-		result, err := agents[i].RunWithHistory(runcontext.With(context.Background(), runcontext.Metadata{WikiRoot: runRoot, SessionID: "fixture"}), "缓存穿透如何处理？")
+		result, err := agents[i].Stream(runcontext.With(context.Background(), runcontext.Metadata{WikiRoot: runRoot, SessionID: "fixture"}), "缓存穿透如何处理？", func(string) error { return nil })
 		if err != nil || result == nil || result.Answer == "" {
 			t.Fatalf("Agent MCP 闭环失败: %v", err)
 		}

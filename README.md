@@ -7,3 +7,5 @@
 文件、目录和正文搜索都由现成 MCP 提供，本项目只负责工具注册、范围约束和 Agent 调用。先执行 `npm ci --prefix mcp`，再在 `config.yaml` 设置 `mcp.registry_file: mcp.yaml`。现成 MCP 已登记在 [mcp.yaml](mcp.yaml)。完整步骤见 [MCP 接入说明](docs/mcp.md)，选型与后续清单见 [Agent Tool 清单](docs/agent-tools.md)。
 
 工具注册层的源码导读与设计理由见 [工具注册层详解](docs/tool-registry.md)。
+
+流式回答从模型、工具调用到网页显示的完整过程见 [流式回答链路与时序图](docs/streaming.md)。

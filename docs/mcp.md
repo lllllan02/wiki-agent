@@ -62,7 +62,7 @@ mcp:
 
 WikiAgent 构造时调用 `LoadMCP(appCtx, cfg.MCP)` 获取共享工具管理器。工具模块以应用生命周期（context 的 Done 通道）和 MCP 配置为共享键；首次调用连接服务、握手并发现工具，后续 Agent 获取同一个 Manager 和相同工具对象。并发构造也只初始化一次。
 
-Agent 构造时调用 `manager.Tools()`，再用 `registry.RegisterTools(agentConfig, tools)` 注册。`RunWithHistory` 只创建 Runner，不获取或释放连接。目录来自运行 context，在实际调用前检查；打开或切换目录不会改变 MCP 连接。
+Agent 构造时调用 `manager.Tools()`，再用 `registry.RegisterTools(agentConfig, tools)` 注册。`Stream` 只创建流式 Runner，不获取或释放连接。目录来自运行 context，在实际调用前检查；打开或切换目录不会改变 MCP 连接。
 
 应用生命周期 context 取消后，工具模块移除共享实例并关闭整组连接。单轮调用取消不会关闭共享连接。初始化失败会清理已建立的连接且不缓存失败结果，后续可以重试。单个 Agent 不得关闭共享 Manager；新应用生命周期会重新建立连接。配置或工具 schema 变更需重启应用。
 

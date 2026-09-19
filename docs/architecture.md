@@ -4,7 +4,7 @@
 
 现已复用 EINO 官方 MCP Tool 适配器接入外部服务器。`internal/tool/mcp` 加载 `mcp.yaml`，负责 stdio / Streamable HTTP 连接、工具发现和命名；`internal/tool/registry` 在模型调用和 MCP 执行之间校验参数、路径范围并限制调用。外部工具实现仍来自依赖包。`mcp/` 保存 Node.js 依赖锁和 Git MCP 的 Python 依赖声明。
 
-WikiAgent 在构造时创建模型、从工具模块获取应用内共享的 MCP 管理器，并注册一次工具；默认 Filesystem 和 ripgrep 在此连接并发现，工具对象和 MCP 连接可供多个 Agent 复用。WikiAgent 只保留一个 EINO Agent，每轮通过上下文传入目录、创建 Runner；RunWithHistory 不负责工具初始化或连接借用。
+WikiAgent 在构造时创建模型、从工具模块获取应用内共享的 MCP 管理器，并注册一次工具；默认 Filesystem 和 ripgrep 在此连接并发现，工具对象和 MCP 连接可供多个 Agent 复用。WikiAgent 只保留一个 EINO Agent，每轮通过上下文传入目录、创建支持流式输出的 Runner；运行方法不负责工具初始化或连接借用。
 
 `internal/tool/registry` 负责工具注册、EINO 并发适配、目录上下文、路径检查及连接生命周期。所有 MCP 跨 Agent 和目录共享，同一应用生命周期、同一份配置只初始化一次，不维护目录连接池。未知名称与重复注册明确报错。原本地 `read_note`、`list_notes` 和 `search_notes` 已移除。
 
@@ -18,7 +18,7 @@ WikiAgent 在构造时创建模型、从工具模块获取应用内共享的 MCP
 
 `internal/tool/mcp` 从 `mcp.yaml` 连接现成服务并应用白名单；`internal/tool/registry` 包装已发现的 MCP 工具并注册到 EINO，启动时检查重名；运行时名称分发由 EINO 负责，执行包装层校验 Wiki 路径边界、参数、超时和输出。文件列表、文件名搜索、正文搜索和读取由 Filesystem 与 ripgrep MCP 实现。没有另写同功能的 Wiki Tool。
 
-`cmd` 负责入口，`internal/app` 创建 Agent 和 HTTP 服务，`internal/web` 维护网页会话。每个 Agent 在构造时接入工具，仅保存 EINO Agent，运行接口仅为 `RunWithHistory(ctx, request)`，运行时创建 Runner。页面打开目录时由 Web 层检查目录存在性。首个 Agent 构造时建立 MCP 连接，后续 Agent 复用；工具组件随应用生命周期 context 关闭，MCP 初始化失败时立即清理。EINO ADK 负责模型调用、工具调用标识及结果回填。
+`cmd` 负责入口，`internal/app` 创建 Agent 和 HTTP 服务，`internal/web` 维护网页会话。每个 Agent 在构造时接入工具，仅保存 EINO Agent，运行接口为 `Stream(ctx, request, onText)`，运行时创建 Runner。页面打开目录时由 Web 层检查目录存在性。首个 Agent 构造时建立 MCP 连接，后续 Agent 复用；工具组件随应用生命周期 context 关闭，MCP 初始化失败时立即清理。EINO ADK 负责模型调用、工具调用标识及结果回填。
 
 ## 演进原则
 
@@ -28,9 +28,11 @@ WikiAgent 在构造时创建模型、从工具模块获取应用内共享的 MCP
 
 ## 请求失败时的信息
 
-`RunWithHistory(ctx, request)` 成功时返回包含最终 `Answer` 的 `Result`；失败时返回错误，由 Web 层整理成页面提示。
+`Stream(ctx, request, onText)` 在生成过程中回调当前助手正文，成功时返回包含最终 `Answer` 的 `Result`；失败时返回错误，由 Web 层作为流式错误事件提示。页面只调用 `/api/chat/stream`。
 
-`internal/runcontext` 在 Web、Agent 和工具之间传递 `SessionID` 与 `WikiRoot`，不传消息历史。当前尚未接入会话存储，每轮只将本次用户请求交给 Runner；保留 RunWithHistory 名称，后续在 Agent 内按会话 ID（并结合 Wiki 边界）加载和保存历史，调用方无需改接口。页面显示的旧消息不会自动成为模型上下文。
+消息片段如何进入 `onText`、页面何时收到 `update`、工具调用由 EINO 在哪里判断，见[流式回答链路与时序图](streaming.md)。
+
+`internal/runcontext` 在 Web、Agent 和工具之间传递 `SessionID` 与 `WikiRoot`，不传消息历史。当前尚未接入会话存储，每轮只将本次用户请求交给 Runner；后续可在 Agent 内按会话 ID（并结合 Wiki 边界）加载和保存历史。页面显示的旧消息不会自动成为模型上下文。
 
 ## 教学注释约定
 
@@ -40,4 +42,4 @@ WikiAgent 在构造时创建模型、从工具模块获取应用内共享的 MCP
 
 ## Web 会话边界
 
-Web 页面每轮等待一个完整回答后再接收下一轮任务。页面在 `sessionStorage` 中保存对话 ID，在本地浏览器保存最近打开的目录；服务按 ID 分开目录选择，目前不保存或回传模型历史；真正执行前由工具注册表校验目录和文件，服务重启后不恢复。当前不实现运行中追加要求、暂停、手动清空会话或上下文压缩，这些仍按后续阶段建设。
+Web 页面逐段显示 Markdown 回答，每轮完成后再接收下一轮任务。页面在 `sessionStorage` 中保存对话 ID，在本地浏览器保存最近打开的目录；服务按 ID 分开目录选择，目前不保存或回传模型历史；真正执行前由工具注册表校验目录和文件，服务重启后不恢复。当前不实现运行中追加要求、暂停、手动清空会话或上下文压缩，这些仍按后续阶段建设。
